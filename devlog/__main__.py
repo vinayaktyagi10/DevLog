@@ -2,7 +2,10 @@ import click
 import sqlite3
 import os
 from rich import print
+from rich.table import Table
+from rich.console import Console
 from datetime import datetime
+from devlog.llm import call_llm
 
 DB_DIR = os.path.expanduser("~/.devlog")
 DB_PATH = os.path.join(DB_DIR, "devlog.db")
@@ -71,7 +74,25 @@ def process():
         count += 1
 
     print(f"[bold green]Processed {count} notes.[/]")
-
+@cli.command()
+def list():
+    """List the log messages"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        select id, raw_text, summary, status from notes
+    """)
+    logs = c.fetchall()
+    conn.close()
+    table = Table(title="Summarized Log Messages")
+    table.add_column("ID", justify="right", style="cyan", no_wrap=True)
+    table.add_column("Raw Text", style="magenta")
+    table.add_column("Summary", style="green")
+    table.add_column("Status", style="yellow")
+    for log in logs:
+        table.add_row(str(log[0]), log[1], log[2] or "-", log[3])
+    console = Console()
+    console.print(table)
 
 
 
