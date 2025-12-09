@@ -7,9 +7,9 @@ from rich.console import Console
 from datetime import datetime
 from devlog.llm import call_llm
 import pymupdf
+from devlog.ingestion.ingest_file import ingest_file
+from devlog.paths import DB_PATH, DB_DIR
 
-DB_DIR = os.path.expanduser("~/.devlog")
-DB_PATH = os.path.join(DB_DIR, "devlog.db")
 
 def init_db():
     """Initialize the database"""
@@ -50,28 +50,29 @@ def add(message):
     if os.path.exists(message) and os.path.isfile(message):
         file_extension = os.path.splitext(message)[1].lower()
         if file_extension in [".pdf", ".docx", ".pptx", ".md", ".txt", ".log"]:
-            count, ids=ingest_file(message)
+            count, ids = ingest_file(message)
             print(f"[bold green]Imported {count} chunks from {message}[/]")
             print(f"[bold green]IDs: {ids}[/]")
-            print(f"[bold green] Run 'devlog process' to summarize the log messages.[/]")
+            print("[bold green]Run 'devlog process' to summarize the entries.[/]")
             return
         else:
-            print(f"[bold red]Error:[/] Unsupported file type: {file_extension}. Supported: .pdf, .md, .txt, .log, .docx, .pptx")
+            print(f"[bold red]Error:[/] Unsupported file type: {file_extension}")
             return
-
     elif os.path.exists(message) and os.path.isdir(message):
         print("[bold red]Error:[/] Cannot add a directory as a log message.")
-    else:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("""
-            INSERT INTO entries (raw_text, created_at)
-            VALUES (?, ?)
-        """, (message, datetime.now().isoformat()))
-        conn.commit()
-        conn.close()
+        return
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
 
-        print(f"[bold green]Added log message:[/] {message}")
+    c.execute("""
+        INSERT INTO entries
+        (raw_text, parent_id, subpart, summary, status, created_at, source, purpose, file_path, file_type, subject, semester)
+        VALUES (?, NULL, NULL, NULL, 'raw', ?, 'manual', 'dev', NULL, NULL, 'General', 'IV')
+    """, (message, datetime.now().isoformat()))
+
+    conn.commit()
+    conn.close()
+    print(f"[bold green]Added log message:[/] {message}")
 
 @cli.command()
 def process():
