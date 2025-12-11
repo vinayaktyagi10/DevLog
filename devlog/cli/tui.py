@@ -1,5 +1,6 @@
 """
-DevLog TUI - Terminal User Interface using Textual
+DevLog TUI - Terminal User Interface with Neovim-like keybindings
+Fixed version with proper keyboard navigation
 """
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical, ScrollableContainer
@@ -48,9 +49,10 @@ class CommitTimeline(ScrollableContainer):
     def __init__(self):
         super().__init__()
         self.border_title = "Timeline"
+        self.can_focus = True
 
     def compose(self) -> ComposeResult:
-        yield ListView()
+        yield ListView(id="commit-list")
 
     async def load_commits(self, limit: int = 50):
         """Load commits from database"""
@@ -77,29 +79,48 @@ class CommitTimeline(ScrollableContainer):
         conn.close()
 
         # Populate ListView
-        list_view = self.query_one(ListView)
+        list_view = self.query_one("#commit-list", ListView)
         await list_view.clear()
 
         for commit in self.commits:
             await list_view.append(CommitListItem(commit))
 
+    async def search_commits(self, query: str):
+        """Search commits by keyword"""
+        from devlog.core.search import search_commits
+
+        results = search_commits(query=query, limit=50)
+        self.commits = results
+
+        # Update ListView
+        list_view = self.query_one("#commit-list", ListView)
+        await list_view.clear()
+
+        for commit in self.commits:
+            await list_view.append(CommitListItem(commit))
+
+        self.app.notify(f"Found {len(results)} commits", severity="information")
+
     def get_selected_commit(self):
         """Get currently selected commit"""
-        list_view = self.query_one(ListView)
+        list_view = self.query_one("#commit-list", ListView)
         if list_view.highlighted_child:
             return list_view.highlighted_child.commit_data
         return None
 
 
 class CodeViewer(ScrollableContainer):
-    """Middle panel: Code diff viewer"""
+    """Middle panel: Code diff viewer with file switching"""
 
     code = reactive("")
     language = reactive("python")
+    current_files = []
+    current_file_index = 0
 
     def __init__(self):
         super().__init__()
         self.border_title = "Code"
+        self.can_focus = True
 
     def compose(self) -> ComposeResult:
         yield Static("Select a commit to view code", id="code-content")
@@ -131,10 +152,19 @@ class CodeViewer(ScrollableContainer):
 
         if not details or not details.get('changes'):
             self.code = "No code changes in this commit"
+            self.current_files = []
             return
 
-        # Show first changed file
-        change = details['changes'][0]
+        self.current_files = details['changes']
+        self.current_file_index = 0
+        self._show_file(0)
+
+    def _show_file(self, index: int):
+        """Show specific file from current commit"""
+        if not self.current_files or index >= len(self.current_files):
+            return
+
+        change = self.current_files[index]
         self.language = change.get('language', 'text')
 
         if change.get('diff_text'):
@@ -144,8 +174,25 @@ class CodeViewer(ScrollableContainer):
         else:
             self.code = "No code available"
 
-        # Update border title with filename
-        self.border_title = f"Code: {change['file_path']}"
+        # Update title with file counter
+        total = len(self.current_files)
+        self.border_title = f"Code: {change['file_path']} [{index+1}/{total}]"
+
+    def next_file(self):
+        """Show next file"""
+        if self.current_file_index < len(self.current_files) - 1:
+            self.current_file_index += 1
+            self._show_file(self.current_file_index)
+        else:
+            self.app.notify("Last file", severity="information")
+
+    def prev_file(self):
+        """Show previous file"""
+        if self.current_file_index > 0:
+            self.current_file_index -= 1
+            self._show_file(self.current_file_index)
+        else:
+            self.app.notify("First file", severity="information")
 
 
 class AnalysisPanel(ScrollableContainer):
@@ -156,6 +203,7 @@ class AnalysisPanel(ScrollableContainer):
     def __init__(self):
         super().__init__()
         self.border_title = "Analysis"
+        self.can_focus = True
 
     def compose(self) -> ComposeResult:
         yield Static("Press 'a' to analyze selected commit", id="analysis-content")
@@ -205,16 +253,45 @@ class AnalysisPanel(ScrollableContainer):
         widget.update(f"[red]Error:[/] {error}")
 
 
+class SearchBar(Input):
+    """Search input bar"""
+
+    def __init__(
+        self,
+        placeholder: str = "Search commits... (press / to focus)",
+        *,
+        id: str | None = None,
+        classes: str | None = None
+    ):
+        super().__init__(placeholder=placeholder, id=id, classes=classes)
+
+
 class StatusBar(Static):
     """Bottom status bar with hints"""
 
+    mode = reactive("normal")
+
     def compose(self) -> ComposeResult:
-        hints = "[dim]↑↓[/] Navigate  [dim]/[/] Search  [dim]a[/] Analyze  [dim]r[/] Review  [dim]Enter[/] Details  [dim]q[/] Quit"
-        yield Label(hints, markup=True)
+        yield Label(self.get_status_text(), markup=True, id="status-label")
+
+    def watch_mode(self, new_mode: str):
+        """Update status text when mode changes"""
+        if not self.is_mounted:
+            return  # do nothing until children are mounted
+
+        label = self.query_one("#status-label", Label)
+        label.update(self.get_status_text())
+
+    def get_status_text(self) -> str:
+        """Generate status text based on mode"""
+        if self.mode == "search":
+            return "[yellow]SEARCH MODE[/] [dim]Enter: search, Esc: cancel[/]"
+        else:
+            return "[dim]j/k[/] Navigate  [dim]/[/] Search  [dim]a[/] Analyze  [dim]n/p[/] Files  [dim]Tab[/] Switch Panel  [dim]q[/] Quit"
 
 
 class DevLogTUI(App):
-    """Main TUI application"""
+    """Main TUI application with Neovim-like keybindings"""
 
     CSS = """
     Screen {
@@ -223,7 +300,7 @@ class DevLogTUI(App):
 
     #main-container {
         layout: horizontal;
-        height: 100%;
+        height: 1fr;
     }
 
     CommitTimeline {
@@ -239,6 +316,17 @@ class DevLogTUI(App):
     AnalysisPanel {
         width: 30%;
         border: solid $accent;
+    }
+
+    SearchBar {
+        dock: top;
+        height: 3;
+        border: solid $accent;
+        display: none;
+    }
+
+    SearchBar.visible {
+        display: block;
     }
 
     StatusBar {
@@ -269,22 +357,56 @@ class DevLogTUI(App):
         height: 100%;
         padding: 1 2;
     }
+
+    .focused {
+        border: solid $success;
+    }
     """
 
     BINDINGS = [
-        Binding("q", "quit", "Quit", show=False),
+        # Vim-like navigation
+        Binding("j", "cursor_down", "Down", show=False),
+        Binding("k", "cursor_up", "Up", show=False),
+        Binding("g", "goto_top", "Top", show=False),
+        Binding("shift+g", "goto_bottom", "Bottom", show=False),
+        Binding("ctrl+d", "half_page_down", "Half Page Down", show=False),
+        Binding("ctrl+u", "half_page_up", "Half Page Up", show=False),
+
+        # File navigation
+        Binding("n", "next_file", "Next File", show=True),
+        Binding("p", "prev_file", "Prev File", show=True),
+
+        # Actions
         Binding("a", "analyze", "Analyze", show=True),
         Binding("r", "review", "Review", show=True),
         Binding("/", "search", "Search", show=True),
-        Binding("?", "help", "Help", show=True),
-        Binding("up,k", "cursor_up", "Up", show=False),
-        Binding("down,j", "cursor_down", "Down", show=False),
+        Binding("escape", "cancel", "Cancel", show=False),
+
+        # Panel switching
+        Binding("tab", "next_panel", "Next Panel", show=True),
+        Binding("shift+tab", "prev_panel", "Prev Panel", show=False),
+        Binding("1", "focus_timeline", "Timeline", show=False),
+        Binding("2", "focus_code", "Code", show=False),
+        Binding("3", "focus_analysis", "Analysis", show=False),
+
+        # Selection
         Binding("enter", "select", "Select", show=False),
+
+        # Help and quit
+        Binding("?", "help", "Help", show=True),
+        Binding("q", "quit", "Quit", show=True),
     ]
+
+    def __init__(self):
+        super().__init__()
+        self.search_mode = False
+        self.panels = []
+        self.current_panel_index = 0
 
     def compose(self) -> ComposeResult:
         """Create child widgets"""
         yield Header()
+        yield SearchBar(id="search-bar")
 
         with Container(id="main-container"):
             yield CommitTimeline()
@@ -298,6 +420,16 @@ class DevLogTUI(App):
         """Initialize when app starts"""
         self.title = "DevLog - Code Review Assistant"
         self.sub_title = "Personal Code Memory"
+
+        # Store panel references
+        self.panels = [
+            self.query_one(CommitTimeline),
+            self.query_one(CodeViewer),
+            self.query_one(AnalysisPanel)
+        ]
+
+        # Focus first panel
+        self.panels[0].focus()
 
         # Load commits
         timeline = self.query_one(CommitTimeline)
@@ -320,8 +452,151 @@ class DevLogTUI(App):
             code_viewer = self.query_one(CodeViewer)
             code_viewer.show_commit_code(commit['short_hash'])
 
+            # Clear previous analysis
+            analysis_panel = self.query_one(AnalysisPanel)
+            analysis_panel.analysis = None
+
+    # Vim-like navigation actions
+    async def action_cursor_down(self) -> None:
+        """Move cursor down (j)"""
+        if self.search_mode:
+            return
+
+        try:
+            list_view = self.query_one("#commit-list", ListView)
+            list_view.action_cursor_down()
+        except:
+            pass
+
+    async def action_cursor_up(self) -> None:
+        """Move cursor up (k)"""
+        if self.search_mode:
+            return
+
+        try:
+            list_view = self.query_one("#commit-list", ListView)
+            list_view.action_cursor_up()
+        except:
+            pass
+
+    async def action_goto_top(self) -> None:
+        """Go to top (g)"""
+        if self.search_mode:
+            return
+
+        try:
+            list_view = self.query_one("#commit-list", ListView)
+            list_view.index = 0
+        except:
+            pass
+
+    async def action_goto_bottom(self) -> None:
+        """Go to bottom (G)"""
+        if self.search_mode:
+            return
+
+        try:
+            list_view = self.query_one("#commit-list", ListView)
+            list_view.index = len(list_view.children) - 1
+        except:
+            pass
+
+    async def action_half_page_down(self) -> None:
+        """Scroll half page down (Ctrl+d)"""
+        if self.search_mode:
+            return
+
+        focused = self.focused
+        if isinstance(focused, ScrollableContainer):
+            focused.scroll_page_down()
+
+    async def action_half_page_up(self) -> None:
+        """Scroll half page up (Ctrl+u)"""
+        if self.search_mode:
+            return
+
+        focused = self.focused
+        if isinstance(focused, ScrollableContainer):
+            focused.scroll_page_up()
+
+    # File navigation
+    async def action_next_file(self) -> None:
+        """Show next file in commit (n)"""
+        code_viewer = self.query_one(CodeViewer)
+        code_viewer.next_file()
+
+    async def action_prev_file(self) -> None:
+        """Show previous file in commit (p)"""
+        code_viewer = self.query_one(CodeViewer)
+        code_viewer.prev_file()
+
+    # Panel switching
+    async def action_next_panel(self) -> None:
+        """Focus next panel (Tab)"""
+        self.current_panel_index = (self.current_panel_index + 1) % len(self.panels)
+        self.panels[self.current_panel_index].focus()
+
+    async def action_prev_panel(self) -> None:
+        """Focus previous panel (Shift+Tab)"""
+        self.current_panel_index = (self.current_panel_index - 1) % len(self.panels)
+        self.panels[self.current_panel_index].focus()
+
+    async def action_focus_timeline(self) -> None:
+        """Focus timeline panel (1)"""
+        self.current_panel_index = 0
+        self.panels[0].focus()
+
+    async def action_focus_code(self) -> None:
+        """Focus code panel (2)"""
+        self.current_panel_index = 1
+        self.panels[1].focus()
+
+    async def action_focus_analysis(self) -> None:
+        """Focus analysis panel (3)"""
+        self.current_panel_index = 2
+        self.panels[2].focus()
+
+    # Search
+    async def action_search(self) -> None:
+        """Enter search mode (/)"""
+        if self.search_mode:
+            return
+
+        self.search_mode = True
+        search_bar = self.query_one("#search-bar", SearchBar)
+        search_bar.add_class("visible")
+        search_bar.focus()
+
+        status_bar = self.query_one(StatusBar)
+        status_bar.mode = "search"
+
+    async def action_cancel(self) -> None:
+        """Cancel search mode (Esc)"""
+        if self.search_mode:
+            self.search_mode = False
+            search_bar = self.query_one("#search-bar", SearchBar)
+            search_bar.remove_class("visible")
+            search_bar.value = ""
+
+            status_bar = self.query_one(StatusBar)
+            status_bar.mode = "normal"
+
+            # Focus back to timeline
+            self.panels[0].focus()
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle search submission"""
+        query = event.value
+        if query and self.search_mode:
+            timeline = self.query_one(CommitTimeline)
+            await timeline.search_commits(query)
+
+            # Exit search mode
+            await self.action_cancel()
+
+    # Analysis
     async def action_analyze(self) -> None:
-        """Analyze selected commit"""
+        """Analyze selected commit (a)"""
         timeline = self.query_one(CommitTimeline)
         commit = timeline.get_selected_commit()
 
@@ -341,7 +616,6 @@ class DevLogTUI(App):
         analyzer = CodeAnalyzer()
 
         try:
-            # Run in thread pool to avoid blocking
             result = await asyncio.to_thread(
                 analyzer.analyze_commit,
                 commit['short_hash'],
@@ -359,170 +633,47 @@ class DevLogTUI(App):
             self.notify(f"Analysis error: {e}", severity="error")
 
     async def action_review(self) -> None:
-        """Full review pipeline"""
-        self.notify("Review feature coming in Day 7!", severity="information")
-
-    async def action_search(self) -> None:
-        """Search commits"""
-        self.notify("Search feature coming in Day 7!", severity="information")
-
-    async def action_help(self) -> None:
-        """Show help"""
-        help_text = """
-[bold cyan]DevLog TUI Help[/]
-
-[bold]Navigation:[/]
-  ↑/↓ or j/k  - Move through commits
-  Enter       - Select commit
-
-[bold]Actions:[/]
-  a           - Analyze selected commit
-  r           - Full review
-  /           - Search commits
-
-[bold]Other:[/]
-  ?           - Show this help
-  q           - Quit
-        """
-
-        self.notify(help_text, timeout=10)
-
-    async def action_cursor_up(self) -> None:
-        """Move cursor up"""
-        list_view = self.query_one(ListView)
-        list_view.action_cursor_up()
-
-    async def action_cursor_down(self) -> None:
-        """Move cursor down"""
-        list_view = self.query_one(ListView)
-        list_view.action_cursor_down()
+        """Full review pipeline (r)"""
+        self.notify("Use CLI: devlog review <topic>", severity="information")
 
     async def action_select(self) -> None:
-        """Select current item"""
-        list_view = self.query_one(ListView)
-        list_view.action_select_cursor()
+        """Select current item (Enter)"""
+        try:
+            list_view = self.query_one("#commit-list", ListView)
+            list_view.action_select_cursor()
+        except:
+            pass
 
+    async def action_help(self) -> None:
+        """Show help (?)"""
+        help_text = """[bold cyan]DevLog TUI - Neovim-style Keybindings[/]
 
-class SearchInput(Input):
-    """Search input at top of timeline"""
+[bold]Navigation:[/]
+  j/k         Move down/up
+  g/G         Go to top/bottom
+  Ctrl+d/u    Half page down/up
 
-    def __init__(self):
-        super().__init__(placeholder="Search commits...")
+[bold]Panels:[/]
+  Tab         Next panel
+  Shift+Tab   Previous panel
+  1/2/3       Jump to Timeline/Code/Analysis
 
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Handle search submission"""
-        query = event.value
-        if query:
-            timeline = self.app.query_one(CommitTimeline)
-            await timeline.search_commits(query)
+[bold]Files:[/]
+  n/p         Next/previous file in commit
 
+[bold]Actions:[/]
+  a           Analyze commit (with Ollama)
+  r           Full review
+  /           Search commits
+  Enter       Select commit
+  Esc         Cancel search
 
-# Add to CommitTimeline class:
-    async def search_commits(self, query: str):
-        """Search commits by keyword"""
-        from devlog.core.search import search_commits
+[bold]Other:[/]
+  ?           Show this help
+  q           Quit
+        """
 
-        results = search_commits(query=query, limit=50)
-        self.commits = results
-
-        # Update ListView
-        list_view = self.query_one(ListView)
-        await list_view.clear()
-
-        for commit in self.commits:
-            await list_view.append(CommitListItem(commit))
-
-        self.app.notify(f"Found {len(results)} commits", severity="information")
-
-
-# Update DevLogTUI.compose() to include search:
-    def compose(self) -> ComposeResult:
-        """Create child widgets"""
-        yield Header()
-
-        with Container(id="main-container"):
-            timeline_container = Vertical()
-            with timeline_container:
-                yield SearchInput()
-                yield CommitTimeline()
-
-            yield CodeViewer()
-            yield AnalysisPanel()
-
-        yield StatusBar()
-        yield Footer()
-
-
-class CodeViewer(ScrollableContainer):
-    """Middle panel: Code diff viewer with file switching"""
-
-    code = reactive("")
-    language = reactive("python")
-    current_files = []
-    current_file_index = 0
-
-    # ... existing code ...
-
-    def show_commit_code(self, commit_hash: str):
-        """Display code for a commit"""
-        details = get_commit_details(commit_hash)
-
-        if not details or not details.get('changes'):
-            self.code = "No code changes in this commit"
-            return
-
-        self.current_files = details['changes']
-        self.current_file_index = 0
-        self._show_file(0)
-
-    def _show_file(self, index: int):
-        """Show specific file from current commit"""
-        if not self.current_files or index >= len(self.current_files):
-            return
-
-        change = self.current_files[index]
-        self.language = change.get('language', 'text')
-
-        if change.get('diff_text'):
-            self.code = change['diff_text']
-        elif change.get('code_after'):
-            self.code = change['code_after']
-        else:
-            self.code = "No code available"
-
-        # Update title with file counter
-        total = len(self.current_files)
-        self.border_title = f"Code: {change['file_path']} [{index+1}/{total}]"
-
-    def next_file(self):
-        """Show next file"""
-        if self.current_file_index < len(self.current_files) - 1:
-            self.current_file_index += 1
-            self._show_file(self.current_file_index)
-
-    def prev_file(self):
-        """Show previous file"""
-        if self.current_file_index > 0:
-            self.current_file_index -= 1
-            self._show_file(self.current_file_index)
-
-
-# Add bindings to DevLogTUI:
-    BINDINGS = [
-        # ... existing bindings ...
-        Binding("n", "next_file", "Next File", show=True),
-        Binding("p", "prev_file", "Prev File", show=True),
-    ]
-
-    async def action_next_file(self) -> None:
-        """Show next file in commit"""
-        code_viewer = self.query_one(CodeViewer)
-        code_viewer.next_file()
-
-    async def action_prev_file(self) -> None:
-        """Show previous file in commit"""
-        code_viewer = self.query_one(CodeViewer)
-        code_viewer.prev_file()
+        self.notify(help_text, timeout=15)
 
 
 def run_tui():
