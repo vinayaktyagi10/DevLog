@@ -1036,6 +1036,50 @@ def compare(commit_hashes):
     print()
 
 @cli.command()
+@click.argument("commit_hash")
+@click.argument("tag")
+def tag(commit_hash, tag):
+    """Add tag to a commit"""
+    from devlog.core.tags import add_tag
+
+    if add_tag(commit_hash, tag):
+        print(f"[green]✓[/] Tagged {commit_hash} with '{tag}'")
+    else:
+        print(f"[red]Failed to tag commit[/]")
+
+
+@cli.command()
+@click.argument("commit_hash")
+@click.argument("tag")
+def untag(commit_hash, tag):
+    """Remove tag from a commit"""
+    from devlog.core.tags import remove_tag
+
+    if remove_tag(commit_hash, tag):
+        print(f"[green]✓[/] Removed tag '{tag}' from {commit_hash}")
+    else:
+        print(f"[red]Tag not found[/]")
+
+
+@cli.command()
+@click.argument("tag")
+def tagged(tag):
+    """Show all commits with a specific tag"""
+    from devlog.core.tags import search_by_tag
+
+    results = search_by_tag(tag)
+
+    if not results:
+        print(f"[yellow]No commits found with tag '{tag}'[/]")
+        return
+
+    print(f"\n[bold]Commits tagged with '{tag}':[/]\n")
+
+    for commit in results:
+        print(f"[cyan]{commit['short_hash']}[/] {commit['message'][:60]}")
+        print(f"  [dim]{commit['timestamp'].split('T')[0]} - {commit['repo_name']}[/]\n")
+
+@cli.command()
 def tui():
     """Launch interactive TUI (Terminal User Interface)"""
     from devlog.cli.tui import run_tui
@@ -1051,6 +1095,8 @@ def tui():
         print(f"[red]TUI error:[/] {e}")
         import traceback
         traceback.print_exc()
+
+
 
 if __name__ == "__main__":
     cli()

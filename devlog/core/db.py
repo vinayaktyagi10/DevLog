@@ -83,10 +83,23 @@ def init_db():
         );
     """)
 
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS commit_tags (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            commit_id INTEGER NOT NULL,
+            tag TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(commit_id) REFERENCES git_commits(id),
+            UNIQUE(commit_id, tag)
+        );
+    """)
+
     c.execute("CREATE INDEX IF NOT EXISTS idx_commits_repo ON git_commits(repo_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_commits_timestamp ON git_commits(timestamp)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_changes_commit ON code_changes(commit_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_changes_language ON code_changes(language)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_tags_commit ON commit_tags(commit_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_tags_tag ON commit_tags(tag)")
 
     conn.commit()
     conn.close()
