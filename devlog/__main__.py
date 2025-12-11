@@ -1010,6 +1010,32 @@ def export_review(review_id, format, output):
     print(f"[green]✓[/] Report saved to: {output}")
 
 @cli.command()
+@click.argument("commit_hashes", nargs=-1)
+def compare(commit_hashes):
+    """Compare multiple commits to identify trends"""
+    from devlog.analysis.compare_commits import CommitComparer
+
+    if len(commit_hashes) < 2:
+        print("[red]Please provide at least 2 commit hashes[/]")
+        return
+
+    comparer = CommitComparer()
+    result = comparer.compare_commits(list(commit_hashes))
+
+    print(f"\n[bold cyan]Comparing {result['commits_analyzed']} Commits[/]\n")
+    print(f"[green]Total additions:[/] {result['total_insertions']}")
+    print(f"[red]Total deletions:[/] {result['total_deletions']}")
+    print(f"[yellow]Net change:[/] {result['net_change']:+}")
+    print(f"[dim]Avg changes/commit:[/] {result['avg_changes_per_commit']:.1f}")
+
+    if result['top_languages']:
+        print(f"\n[bold]Top Languages:[/]")
+        for lang, count in result['top_languages']:
+            print(f"  {lang}: {count} files")
+
+    print()
+
+@cli.command()
 def tui():
     """Launch interactive TUI (Terminal User Interface)"""
     from devlog.cli.tui import run_tui
