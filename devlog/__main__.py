@@ -982,5 +982,22 @@ def scrape(url):
             if len(content['code_blocks'][0]) > 300:
                 print("...")
 
+@cli.command()
+def tui():
+    """Launch interactive TUI (Terminal User Interface)"""
+    from devlog.cli.tui import run_tui
+
+    print("[cyan]Launching DevLog TUI...[/]")
+    print("[dim]Press ? for help, q to quit[/]\n")
+
+    try:
+        run_tui()
+    except KeyboardInterrupt:
+        print("\n[yellow]TUI closed[/]")
+    except Exception as e:
+        print(f"[red]TUI error:[/] {e}")
+        import traceback
+        traceback.print_exc()
+
 if __name__ == "__main__":
     cli()
