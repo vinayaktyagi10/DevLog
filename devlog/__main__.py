@@ -40,6 +40,16 @@ def untrack(repo_path):
     else:
         print("[bold red]Error:[/] Failed to uninstall hook")
 
+@cli.command('_capture-commit')
+@click.argument("repo_path")
+def _capture_commit(repo_path):
+    """Internal: Called by git hook to capture commit"""
+    from devlog.core.git_hooks import capture_commit
+    try:
+        capture_commit(repo_path)
+    except Exception as e:
+        pass
+
 @cli.command()
 def repos():
     """List all tracked repositories"""
