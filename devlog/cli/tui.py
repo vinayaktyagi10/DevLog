@@ -681,6 +681,8 @@ def run_tui():
     app = DevLogTUI()
     app.run()
 
+def main():
+    run()
 
 if __name__ == "__main__":
     run_tui()

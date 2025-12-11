@@ -23,6 +23,7 @@ from devlog.search.web_search import WebSearcher
 from devlog.search.scraper import WebScraper
 from devlog.search.content_extractor import ContentExtractor
 from devlog.analysis.review import ReviewPipeline
+from devlog.cli.tui import main as tui_main
 
 @click.group()
 def cli():
@@ -1095,6 +1096,12 @@ def tui():
         print(f"[red]TUI error:[/] {e}")
         import traceback
         traceback.print_exc()
+
+def main():
+    if len(sys.argv) > 1:
+        if sys.argv[1] == 'tui':
+            return tui_main()
+    print("DevLog - Personal Code Review Assistant")
 
 
 
