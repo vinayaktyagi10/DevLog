@@ -19,6 +19,10 @@ from pygments.lexers import get_lexer_by_name, guess_lexer
 from pygments.formatters import TerminalFormatter
 import json
 from devlog.core.embeddings import semantic_search, embed_all_commits
+from devlog.search.web_search import WebSearcher
+from devlog.search.scraper import WebScraper
+from devlog.search.content_extractor import ContentExtractor
+from devlog.analysis.review import ReviewPipeline
 
 @click.group()
 def cli():
@@ -717,6 +721,266 @@ def test_llm():
         print("1. Make sure Ollama is installed")
         print("2. Start Ollama: [bold]ollama serve[/]")
         print("3. Pull the model: [bold]ollama pull 'model name' [/]")
+
+@cli.command()
+@click.argument("query")
+@click.option("--limit", default=10, help="Number of results")
+def search_web(query, limit):
+    """Search web for technical information"""
+    from devlog.search.web_search import WebSearcher
+
+    searcher = WebSearcher()
+    print(f"[yellow]Searching for: {query}[/]")
+    print(f"[dim]Using: {'Brave API' if searcher.use_brave else 'DuckDuckGo'}[/]\n")
+
+    results = searcher.search(query, num_results=limit)
+
+    if not results:
+        print("[red]No results found[/]")
+        return
+
+    table = Table(title=f"Search Results ({len(results)})")
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Title", style="cyan")
+    table.add_column("Source", style="yellow", width=25)
+    table.add_column("Score", justify="right", style="green", width=6)
+
+    for i, result in enumerate(results, 1):
+        table.add_row(
+            str(i),
+            result['title'][:60] + "..." if len(result['title']) > 60 else result['title'],
+            result['source'],
+            f"{result['score']:.2f}"
+        )
+
+    console = Console()
+    console.print(table)
+
+    # Show top result details
+    print(f"\n[bold]Top Result:[/]")
+    top = results[0]
+    print(f"[cyan]{top['title']}[/]")
+    print(f"[dim]{top['url']}[/]")
+    print(f"{top['snippet'][:200]}...")
+
+
+@cli.command()
+@click.argument("topic")
+@click.option("--language", help="Programming language")
+def best_practices(topic, language):
+    """Search and summarize best practices for a topic"""
+    from devlog.search.web_search import WebSearcher
+    from devlog.search.scraper import WebScraper
+    from devlog.search.content_extractor import ContentExtractor
+
+    print(f"[yellow]Finding best practices for: {topic}[/]")
+    if language:
+        print(f"[dim]Language: {language}[/]")
+
+    # Search
+    searcher = WebSearcher()
+    results = searcher.search_topic(topic, language, num_results=5)
+
+    if not results:
+        print("[red]No results found[/]")
+        return
+
+    print(f"[green]✓[/] Found {len(results)} sources")
+
+    # Scrape top 3
+    print("[yellow]Scraping sources...[/]")
+    scraper = WebScraper()
+    contents = scraper.scrape_multiple([r['url'] for r in results[:3]])
+
+    print(f"[green]✓[/] Scraped {len(contents)} sources")
+
+    # Extract practices
+    print("[yellow]Extracting best practices...[/]")
+    extractor = ContentExtractor()
+
+    all_practices = []
+    all_examples = []
+
+    for content in contents:
+        practices = extractor.extract_best_practices(content)
+        examples = extractor.extract_code_examples(content)
+
+        all_practices.extend(practices)
+        all_examples.extend(examples)
+
+    print(f"[green]✓[/] Found {len(all_practices)} practices, {len(all_examples)} code examples\n")
+
+    # Display
+    print(f"[bold cyan]Best Practices for {topic}:[/]\n")
+
+    for i, practice in enumerate(all_practices[:10], 1):
+        print(f"{i}. {practice}")
+
+    if all_examples:
+        print(f"\n[bold cyan]Code Examples:[/]\n")
+        for i, example in enumerate(all_examples[:3], 1):
+            print(f"[bold]Example {i}:[/] [dim]({example['language']})[/]")
+            code_lines = example['code'].split('\n')[:10]
+            for line in code_lines:
+                print(f"  {line}")
+            if len(example['code'].split('\n')) > 10:
+                print("  ...")
+            print()
+
+
+@cli.command()
+@click.argument("topic")
+@click.option("--language", help="Filter by programming language")
+@click.option("--commits", default=5, help="Number of commits to analyze")
+@click.option("--deep", is_flag=True, help="Use deep analysis")
+def review(topic, language, commits, deep):
+    """Full code review: your code + web best practices + comparison"""
+    from devlog.analysis.review import ReviewPipeline
+    from devlog.analysis.llm import test_connection
+
+    # Check Ollama
+    if not test_connection():
+        print("[bold red]Error:[/] Cannot connect to Ollama")
+        print("[yellow]Start Ollama:[/] ollama serve")
+        return
+
+    print(f"\n[bold cyan]Starting Full Code Review[/]")
+    print(f"[dim]Topic: {topic}[/]")
+    if language:
+        print(f"[dim]Language: {language}[/]")
+    print()
+
+    pipeline = ReviewPipeline()
+
+    try:
+        review_result = pipeline.review_topic(topic, language, commits, deep)
+
+        if 'error' in review_result:
+            print(f"[bold red]Error:[/] {review_result['error']}")
+            if 'suggestion' in review_result:
+                print(f"[yellow]Suggestion:[/] {review_result['suggestion']}")
+            return
+
+        # Generate and display report
+        print("\n" + "=" * 70)
+        print(pipeline.generate_report(review_result, format='text'))
+        print("=" * 70)
+
+        print(f"\n[green]✓ Review complete![/]")
+        print(f"[dim]Review ID: {review_result.get('id')}[/]")
+        print(f"[dim]View again: devlog show-review {review_result.get('id')}[/]")
+
+    except Exception as e:
+        print(f"[bold red]Review failed:[/] {e}")
+        import traceback
+        traceback.print_exc()
+
+
+@cli.command()
+@click.option("--limit", default=20, help="Number of reviews to show")
+def reviews(limit):
+    """List all code reviews"""
+    from devlog.analysis.review import ReviewPipeline
+
+    pipeline = ReviewPipeline()
+    review_list = pipeline.list_reviews(limit)
+
+    if not review_list:
+        print("[yellow]No reviews found yet[/]")
+        print("Run [bold]devlog review <topic>[/] to create one")
+        return
+
+    table = Table(title="Code Reviews")
+    table.add_column("ID", style="dim", width=5)
+    table.add_column("Topic", style="cyan")
+    table.add_column("Commits", justify="right", style="green", width=8)
+    table.add_column("Date", style="magenta")
+
+    for review in review_list:
+        # Parse commits_analyzed JSON
+        try:
+            commits = json.loads(review['commits_analyzed'])
+            num_commits = len(commits) if isinstance(commits, list) else 0
+        except:
+            num_commits = 0
+
+        table.add_row(
+            str(review['id']),
+            review['topic'],
+            str(num_commits),
+            review['created_at'].split('T')[0]
+        )
+
+    console = Console()
+    console.print(table)
+
+
+@cli.command()
+@click.argument("review_id", type=int)
+@click.option("--format", type=click.Choice(['text', 'markdown']), default='text')
+@click.option("--save", help="Save report to file")
+def show_review(review_id, format, save):
+    """Show detailed review report"""
+    from devlog.analysis.review import ReviewPipeline
+
+    pipeline = ReviewPipeline()
+    review = pipeline.get_review(review_id)
+
+    if not review:
+        print(f"[bold red]Review not found:[/] {review_id}")
+        return
+
+    # Parse JSON fields
+    try:
+        review['comparison'] = json.loads(review.get('comparison', '{}'))
+        review['your_analysis'] = json.loads(review.get('your_analysis', '{}'))
+    except:
+        pass
+
+    # Generate report
+    report = pipeline.generate_report(review, format=format)
+
+    # Display or save
+    if save:
+        with open(save, 'w') as f:
+            f.write(report)
+        print(f"[green]✓[/] Report saved to: {save}")
+    else:
+        print(report)
+
+
+@cli.command()
+@click.argument("url")
+def scrape(url):
+    """Scrape and display content from a URL (for testing)"""
+    from devlog.search.scraper import WebScraper
+
+    print(f"[yellow]Scraping:[/] {url}")
+
+    scraper = WebScraper()
+    content = scraper.scrape_url(url)
+
+    if not content:
+        print("[red]Failed to scrape URL[/]")
+        return
+
+    print(f"\n[bold cyan]Title:[/] {content.get('title', 'N/A')}")
+    print(f"[bold]Source Type:[/] {content.get('source_type', 'unknown')}")
+    print(f"[bold]Quality Score:[/] {scraper.score_content_quality(content):.2f}")
+
+    if content.get('votes'):
+        print(f"[bold]Votes:[/] {content['votes']}")
+
+    print(f"\n[bold cyan]Content Preview:[/]")
+    print(content.get('content', '')[:500] + "...")
+
+    if content.get('code_blocks'):
+        print(f"\n[bold cyan]Code Blocks Found:[/] {len(content['code_blocks'])}")
+        if content['code_blocks']:
+            print("\n[bold]First Code Block:[/]")
+            print(content['code_blocks'][0][:300])
+            if len(content['code_blocks'][0]) > 300:
+                print("...")
 
 if __name__ == "__main__":
     cli()
