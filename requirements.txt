@@ -6,6 +6,7 @@ lxml
 textual
 pygments
 pyperclip
-sentence_transformers
+sentence-transformers
 httpx
 requests
+ddgs
