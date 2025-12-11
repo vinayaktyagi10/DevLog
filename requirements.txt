@@ -1,3 +1,11 @@
 click
 rich
-
+GitPython
+beautifulsoup4
+lxml
+textual
+pygments
+pyperclip
+sentence-transformers
+httpx
+requests
