@@ -983,6 +983,33 @@ def scrape(url):
                 print("...")
 
 @cli.command()
+@click.argument("review_id", type=int)
+@click.option("--format", type=click.Choice(['markdown', 'json']), default='markdown')
+@click.option("--output", help="Output file path")
+def export_review(review_id, format, output):
+    """Export review to file"""
+    from devlog.analysis.review import ReviewPipeline
+    from devlog.export.report_generator import ReportGenerator
+
+    pipeline = ReviewPipeline()
+    review = pipeline.get_review(review_id)
+
+    if not review:
+        print(f"[bold red]Review not found:[/] {review_id}")
+        return
+
+    # Generate filename if not provided
+    if not output:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ext = 'md' if format == 'markdown' else 'json'
+        output = f"review_{review_id}_{timestamp}.{ext}"
+
+    generator = ReportGenerator()
+    generator.save_report(review, output, format)
+
+    print(f"[green]✓[/] Report saved to: {output}")
+
+@cli.command()
 def tui():
     """Launch interactive TUI (Terminal User Interface)"""
     from devlog.cli.tui import run_tui
