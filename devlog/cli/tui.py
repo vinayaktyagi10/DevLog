@@ -17,6 +17,7 @@ from devlog.paths import DB_PATH
 from devlog.core.search import get_commit_details
 from devlog.analysis.analyzer import CodeAnalyzer
 from devlog.analysis.llm import test_connection
+from devlog.search.web_search import WebSearcher
 import asyncio
 
 
@@ -253,6 +254,43 @@ class AnalysisPanel(ScrollableContainer):
         widget.update(f"[red]Error:[/] {error}")
 
 
+class WebSearchPanel(ScrollableContainer):
+    """Web Search results panel"""
+
+    results = reactive([])
+
+    def __init__(self):
+        super().__init__()
+        self.border_title = "Web Search"
+        self.can_focus = True
+        self.display = False  # Hidden by default
+
+    def compose(self) -> ComposeResult:
+        yield Static("Press 'w' to search the web", id="web-content")
+
+    def show_results(self, results):
+        """Display search results"""
+        widget = self.query_one("#web-content", Static)
+
+        if not results:
+            widget.update("No results found")
+            return
+
+        lines = []
+        for i, res in enumerate(results, 1):
+            lines.append(f"[bold cyan]{i}. {res['title']}[/]")
+            lines.append(f"[dim]{res['source']}[/]")
+            lines.append(f"{res['snippet']}")
+            lines.append("")
+
+        text = Text.from_markup("\n".join(lines))
+        widget.update(text)
+
+    def show_loading(self):
+        widget = self.query_one("#web-content", Static)
+        widget.update("[yellow]Searching...[/]")
+
+
 class SearchBar(Input):
     """Search input bar"""
 
@@ -286,8 +324,10 @@ class StatusBar(Static):
         """Generate status text based on mode"""
         if self.mode == "search":
             return "[yellow]SEARCH MODE[/] [dim]Enter: search, Esc: cancel[/]"
+        elif self.mode == "web_search":
+            return "[yellow]WEB SEARCH[/] [dim]Enter: search query, Esc: cancel[/]"
         else:
-            return "[dim]j/k[/] Navigate  [dim]/[/] Search  [dim]a[/] Analyze  [dim]n/p[/] Files  [dim]Tab[/] Switch Panel  [dim]q[/] Quit"
+            return "[dim]j/k[/] Navigate  [dim]/[/] Search Commits  [dim]w[/] Web Search  [dim]a[/] Analyze  [dim]tab[/] Switch Panel  [dim]q[/] Quit"
 
 
 class DevLogTUI(App):
@@ -316,6 +356,16 @@ class DevLogTUI(App):
     AnalysisPanel {
         width: 30%;
         border: solid $accent;
+    }
+
+    WebSearchPanel {
+        width: 30%;
+        border: solid $accent;
+        display: none; 
+    }
+
+    WebSearchPanel.visible {
+        display: block;
     }
 
     SearchBar {
@@ -357,6 +407,12 @@ class DevLogTUI(App):
         height: 100%;
         padding: 1 2;
     }
+    
+    #web-content {
+        width: 100%;
+        height: 100%;
+        padding: 1 2;
+    }
 
     .focused {
         border: solid $success;
@@ -379,7 +435,8 @@ class DevLogTUI(App):
         # Actions
         Binding("a", "analyze", "Analyze", show=True),
         Binding("r", "review", "Review", show=True),
-        Binding("/", "search", "Search", show=True),
+        Binding("/", "search", "Search Commits", show=True),
+        Binding("w", "web_search", "Web Search", show=True),
         Binding("escape", "cancel", "Cancel", show=False),
 
         # Panel switching
@@ -388,6 +445,7 @@ class DevLogTUI(App):
         Binding("1", "focus_timeline", "Timeline", show=False),
         Binding("2", "focus_code", "Code", show=False),
         Binding("3", "focus_analysis", "Analysis", show=False),
+        Binding("4", "focus_web", "Web", show=False),
 
         # Selection
         Binding("enter", "select", "Select", show=False),
@@ -400,6 +458,7 @@ class DevLogTUI(App):
     def __init__(self):
         super().__init__()
         self.search_mode = False
+        self.web_search_mode = False
         self.panels = []
         self.current_panel_index = 0
 
@@ -412,6 +471,7 @@ class DevLogTUI(App):
             yield CommitTimeline()
             yield CodeViewer()
             yield AnalysisPanel()
+            yield WebSearchPanel()
 
         yield StatusBar()
         yield Footer()
@@ -425,7 +485,8 @@ class DevLogTUI(App):
         self.panels = [
             self.query_one(CommitTimeline),
             self.query_one(CodeViewer),
-            self.query_one(AnalysisPanel)
+            self.query_one(AnalysisPanel),
+            self.query_one(WebSearchPanel)
         ]
 
         # Focus first panel
@@ -459,7 +520,7 @@ class DevLogTUI(App):
     # Vim-like navigation actions
     async def action_cursor_down(self) -> None:
         """Move cursor down (j)"""
-        if self.search_mode:
+        if self.search_mode or self.web_search_mode:
             return
 
         try:
@@ -470,7 +531,7 @@ class DevLogTUI(App):
 
     async def action_cursor_up(self) -> None:
         """Move cursor up (k)"""
-        if self.search_mode:
+        if self.search_mode or self.web_search_mode:
             return
 
         try:
@@ -481,7 +542,7 @@ class DevLogTUI(App):
 
     async def action_goto_top(self) -> None:
         """Go to top (g)"""
-        if self.search_mode:
+        if self.search_mode or self.web_search_mode:
             return
 
         try:
@@ -492,7 +553,7 @@ class DevLogTUI(App):
 
     async def action_goto_bottom(self) -> None:
         """Go to bottom (G)"""
-        if self.search_mode:
+        if self.search_mode or self.web_search_mode:
             return
 
         try:
@@ -503,7 +564,7 @@ class DevLogTUI(App):
 
     async def action_half_page_down(self) -> None:
         """Scroll half page down (Ctrl+d)"""
-        if self.search_mode:
+        if self.search_mode or self.web_search_mode:
             return
 
         focused = self.focused
@@ -512,7 +573,7 @@ class DevLogTUI(App):
 
     async def action_half_page_up(self) -> None:
         """Scroll half page up (Ctrl+u)"""
-        if self.search_mode:
+        if self.search_mode or self.web_search_mode:
             return
 
         focused = self.focused
@@ -533,12 +594,18 @@ class DevLogTUI(App):
     # Panel switching
     async def action_next_panel(self) -> None:
         """Focus next panel (Tab)"""
-        self.current_panel_index = (self.current_panel_index + 1) % len(self.panels)
+        # If we have 3 panels visible (normal mode), cycle 3
+        # If web panel is visible (we'll implement toggle), maybe 4?
+        # For simplicity, let's keep web panel hidden unless focused or searched
+        
+        limit = 4 if self.panels[3].has_class("visible") else 3
+        self.current_panel_index = (self.current_panel_index + 1) % limit
         self.panels[self.current_panel_index].focus()
 
     async def action_prev_panel(self) -> None:
         """Focus previous panel (Shift+Tab)"""
-        self.current_panel_index = (self.current_panel_index - 1) % len(self.panels)
+        limit = 4 if self.panels[3].has_class("visible") else 3
+        self.current_panel_index = (self.current_panel_index - 1) % limit
         self.panels[self.current_panel_index].focus()
 
     async def action_focus_timeline(self) -> None:
@@ -556,24 +623,66 @@ class DevLogTUI(App):
         self.current_panel_index = 2
         self.panels[2].focus()
 
+    async def action_focus_web(self) -> None:
+        """Focus web panel (4)"""
+        # Toggle visibility
+        web_panel = self.panels[3]
+        analysis_panel = self.panels[2]
+        
+        web_panel.add_class("visible")
+        analysis_panel.display = False # Swap analysis with web to save space?
+        # Or just have it overlay/replace one
+        
+        # Let's replace Analysis with Web for now or just cycle
+        # CSS handles display:none for default
+        
+        # Simple toggle: show web, hide analysis
+        web_panel.add_class("visible")
+        analysis_panel.display = False
+        
+        self.current_panel_index = 3
+        web_panel.focus()
+
     # Search
     async def action_search(self) -> None:
-        """Enter search mode (/)"""
-        if self.search_mode:
+        """Enter commit search mode (/)"""
+        if self.search_mode or self.web_search_mode:
             return
 
         self.search_mode = True
         search_bar = self.query_one("#search-bar", SearchBar)
+        search_bar.placeholder = "Search commits..."
         search_bar.add_class("visible")
         search_bar.focus()
 
         status_bar = self.query_one(StatusBar)
         status_bar.mode = "search"
+        
+    async def action_web_search(self) -> None:
+        """Enter web search mode (w)"""
+        if self.search_mode or self.web_search_mode:
+            return
+
+        self.web_search_mode = True
+        search_bar = self.query_one("#search-bar", SearchBar)
+        search_bar.placeholder = "Search web (e.g. 'python best practices')..."
+        search_bar.add_class("visible")
+        search_bar.focus()
+
+        status_bar = self.query_one(StatusBar)
+        status_bar.mode = "web_search"
+        
+        # Show web panel
+        web_panel = self.panels[3]
+        analysis_panel = self.panels[2]
+        web_panel.add_class("visible")
+        analysis_panel.display = False
 
     async def action_cancel(self) -> None:
         """Cancel search mode (Esc)"""
-        if self.search_mode:
+        if self.search_mode or self.web_search_mode:
             self.search_mode = False
+            self.web_search_mode = False
             search_bar = self.query_one("#search-bar", SearchBar)
             search_bar.remove_class("visible")
             search_bar.value = ""
@@ -587,12 +696,33 @@ class DevLogTUI(App):
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle search submission"""
         query = event.value
-        if query and self.search_mode:
+        if not query:
+            await self.action_cancel()
+            return
+            
+        if self.search_mode:
             timeline = self.query_one(CommitTimeline)
             await timeline.search_commits(query)
-
-            # Exit search mode
             await self.action_cancel()
+            
+        elif self.web_search_mode:
+            web_panel = self.query_one(WebSearchPanel)
+            web_panel.show_loading()
+            
+            # Execute search
+            searcher = WebSearcher()
+            try:
+                # Run in background to not block UI
+                results = await asyncio.to_thread(searcher.search, query, 10)
+                web_panel.show_results(results)
+            except Exception as e:
+                web_panel.show_results([{"title": "Error", "source": "System", "snippet": str(e)}])
+                
+            await self.action_cancel()
+            
+            # Keep web panel focused
+            web_panel.focus()
+            self.current_panel_index = 3
 
     # Analysis
     async def action_analyze(self) -> None:
@@ -609,7 +739,12 @@ class DevLogTUI(App):
             self.notify("Ollama not running - start with 'ollama serve'", severity="error")
             return
 
+        # Ensure analysis panel is visible
         analysis_panel = self.query_one(AnalysisPanel)
+        web_panel = self.query_one(WebSearchPanel)
+        analysis_panel.display = True
+        web_panel.remove_class("visible")
+        
         analysis_panel.show_loading()
 
         # Run analysis in background
@@ -657,6 +792,7 @@ class DevLogTUI(App):
   Tab         Next panel
   Shift+Tab   Previous panel
   1/2/3       Jump to Timeline/Code/Analysis
+  4           Jump to Web Search
 
 [bold]Files:[/]
   n/p         Next/previous file in commit
@@ -665,6 +801,7 @@ class DevLogTUI(App):
   a           Analyze commit (with Ollama)
   r           Full review
   /           Search commits
+  w           Web Search
   Enter       Select commit
   Esc         Cancel search
 
@@ -682,7 +819,7 @@ def run_tui():
     app.run()
 
 def main():
-    run()
+    run_tui()
 
 if __name__ == "__main__":
     run_tui()

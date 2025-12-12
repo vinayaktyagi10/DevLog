@@ -1,3 +1,4 @@
+import sys
 import click
 import sqlite3
 from rich import print
@@ -1101,9 +1102,8 @@ def main():
     if len(sys.argv) > 1:
         if sys.argv[1] == 'tui':
             return tui_main()
-    print("DevLog - Personal Code Review Assistant")
-
+    cli()
 
 
 if __name__ == "__main__":
-    cli()
+    main()

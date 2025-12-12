@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "devlog"
+version = "0.1.0"
+description = "DevLog CLI"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "click",
+    "rich",
+    "GitPython",
+    "beautifulsoup4",
+    "lxml",
+    "textual",
+    "pygments",
+    "pyperclip",
+    "sentence-transformers",
+    "httpx",
+    "requests",
+    "ddgs",
+]
+
+[project.scripts]
+devlog = "devlog.__main__:main"
+devlog-tui = "devlog.cli.tui:main"
+
