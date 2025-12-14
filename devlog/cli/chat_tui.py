@@ -4,12 +4,15 @@ Direct conversation with the AI, separated from the main dashboard.
 """
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
-from textual.widgets import Header, Footer, Static, Input, Button, Label
+from textual.widgets import Header, Footer, Static, TextArea, Button, Label
 from textual.binding import Binding
 from textual import work
+from textual.events import Key
+import logging
+import pyperclip
+
 from devlog.analysis.chat_manager import ChatManager
 from devlog.analysis.llm import test_connection
-import logging
 
 # Setup logging
 logging.basicConfig(
@@ -24,6 +27,7 @@ class ChatPanel(Container):
 
     BINDINGS = [
         Binding("ctrl+l", "clear_chat", "Clear Chat", show=True),
+        Binding("ctrl+y", "copy_last_response", "Copy Last Response", show=True),
     ]
 
     def __init__(self, chat_manager: ChatManager, **kwargs):
@@ -31,6 +35,7 @@ class ChatPanel(Container):
         self.chat_manager = chat_manager
         self.ai_response_widget = None
         self.message_count = 0
+        self.last_ai_response_text = ""
 
     def compose(self) -> ComposeResult:
         """Build the chat UI"""
@@ -39,9 +44,10 @@ class ChatPanel(Container):
         
         # Input area at bottom
         with Horizontal(id="chat-input-area"):
-            yield Input(
-                placeholder="Ask DevLog a question... (Press Enter to send)",
-                id="chat-input"
+            # Using TextArea for multi-line input
+            yield TextArea(
+                id="chat-input",
+                show_line_numbers=False
             )
             yield Button("Send", variant="primary", id="send-btn")
             yield Button("Clear", variant="default", id="clear-btn")
@@ -56,20 +62,38 @@ class ChatPanel(Container):
     def focus_input(self) -> None:
         """Focus the input field"""
         try:
-            self.query_one("#chat-input", Input).focus()
+            self.query_one("#chat-input", TextArea).focus()
         except Exception as e:
             logger.error(f"Failed to focus input: {e}")
+
+    # ... (add_message remains mostly same, just capturing text for clipboard)
 
     def add_message(self, role: str, content: str) -> None:
         """Add a message to the chat display"""
         try:
+            # Clean up content for display (hide thinking and tool calls)
+            import re
+            
+            # Remove <tool>...</tool> blocks
+            display_content = re.sub(r'<tool>.*?</tool>', '', content, flags=re.DOTALL)
+            
+            # Remove <thinking>...</thinking> blocks
+            display_content = re.sub(r'<thinking>.*?</thinking>', '', display_content, flags=re.DOTALL)
+            
+            display_content = display_content.strip()
+            
+            if not display_content and role == "assistant":
+                # If everything was filtered out, don't show an empty message
+                # (The tool execution status will be shown separately)
+                return
+
             messages_area = self.query_one("#chat-messages-area", VerticalScroll)
             self.message_count += 1
             
             if role == "user":
                 # User message
                 msg = Label(
-                    f"[bold blue]You:[/bold blue] {content}",
+                    f"[bold blue]You:[/bold blue] {content}", # User content is always safe
                     classes="chat-message user-message",
                     markup=True
                 )
@@ -96,37 +120,75 @@ class ChatPanel(Container):
                 )
                 # Initialize a buffer for this widget
                 self.ai_response_widget._content_buffer = "[bold magenta]DevLog:[/bold magenta] "
+                # Also reset the plain text buffer for copying
+                self.last_ai_response_text = "" 
                 messages_area.mount(self.ai_response_widget)
                 messages_area.scroll_end(animate=False)
                 
             elif role == "ai_stream":
                 # Append to existing AI response
                 if self.ai_response_widget:
+                    # We can't easily filter streaming content with regex because tags might be split across chunks.
+                    # For now, we will append raw content and let the final render handle it, 
+                    # OR we accept that streaming will show tags temporarily.
+                    # A robust stream filter is complex. 
+                    # Let's try to just append for now, but maybe we can suppress <tool> if we detect it starting?
+                    # Actually, ChatManager sends `[Running tool...]` as a separate chunk/message usually.
+                    
                     self.ai_response_widget._content_buffer += content
-                    self.ai_response_widget.update(self.ai_response_widget._content_buffer)
+                    self.last_ai_response_text += content # Accumulate plain text
+                    
+                    # Attempt to hide tags in the live update if possible, or just show raw
+                    # Ideally, we'd process `self.last_ai_response_text` with the regex and update the widget
+                    clean_text = re.sub(r'<tool>.*?(?:</tool>|$)', '', self.last_ai_response_text, flags=re.DOTALL)
+                    clean_text = re.sub(r'<thinking>.*?(?:</thinking>|$)', '', clean_text, flags=re.DOTALL)
+                    
+                    if clean_text.strip():
+                         self.ai_response_widget.update("[bold magenta]DevLog:[/bold magenta] " + clean_text)
+                    else:
+                        # If only thinking/tool so far, maybe show a "Thinking..." indicator?
+                        self.ai_response_widget.update("[bold magenta]DevLog:[/bold magenta] [dim]Thinking...[/dim]")
+                        
                     messages_area.scroll_end(animate=False)
         except Exception as e:
             logger.error(f"Error adding message: {e}")
 
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Handle Enter key in input"""
-        if event.input.id == "chat-input":
-            message = event.input.value.strip()
-            if message:
-                event.input.value = ""
-                await self.send_message(message)
+    async def on_key(self, event: Key) -> None:
+        """Handle key events for submission"""
+        # If Enter is pressed without Shift, submit the message
+        if event.key == "enter" and not event.shift:
+            # Check if focus is on TextArea
+            if self.query_one("#chat-input", TextArea).has_focus:
+                event.stop() # Prevent newline insertion
+                await self.submit_message()
+
+    async def submit_message(self) -> None:
+        """Submit message from TextArea"""
+        input_widget = self.query_one("#chat-input", TextArea)
+        message = input_widget.text.strip()
+        if message:
+            input_widget.text = "" # Clear input
+            await self.send_message(message)
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button clicks"""
         if event.button.id == "send-btn":
-            input_widget = self.query_one("#chat-input", Input)
-            message = input_widget.value.strip()
-            if message:
-                input_widget.value = ""
-                await self.send_message(message)
-                
+            await self.submit_message()
         elif event.button.id == "clear-btn":
             self.action_clear_chat()
+
+    def action_copy_last_response(self) -> None:
+        """Copy the last AI response to clipboard"""
+        if self.last_ai_response_text:
+            try:
+                pyperclip.copy(self.last_ai_response_text)
+                self.app.notify("📋 Copied last response to clipboard!", severity="information")
+            except Exception as e:
+                self.app.notify(f"Failed to copy: {e}", severity="error")
+        else:
+            self.app.notify("No response to copy yet.", severity="warning")
+
+    # ... (rest of methods)
 
     async def send_message(self, message: str) -> None:
         """Send a message and get AI response"""
@@ -227,14 +289,16 @@ class DevLogChat(App):
 
     #chat-input-area {
         height: auto;
+        min-height: 3;
         width: 100%;
-        padding: 1;
+        padding: 1 0;
         background: $surface;
         dock: bottom;
     }
 
     #chat-input {
         width: 1fr;
+        height: 3;
         background: $boost;
         border: tall $primary;
         color: $text;
@@ -244,6 +308,7 @@ class DevLogChat(App):
         width: auto;
         min-width: 10;
         margin-left: 1;
+        height: 3;
     }
     """
 
