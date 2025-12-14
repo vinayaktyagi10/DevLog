@@ -21,6 +21,7 @@ dependencies = [
     "httpx",
     "requests",
     "ddgs",
+    "jsonschema",
 ]
 
 [project.scripts]

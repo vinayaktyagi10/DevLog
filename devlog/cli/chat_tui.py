@@ -66,27 +66,9 @@ class ChatPanel(Container):
         except Exception as e:
             logger.error(f"Failed to focus input: {e}")
 
-    # ... (add_message remains mostly same, just capturing text for clipboard)
-
     def add_message(self, role: str, content: str) -> None:
         """Add a message to the chat display"""
         try:
-            # Clean up content for display (hide thinking and tool calls)
-            import re
-            
-            # Remove <tool>...</tool> blocks
-            display_content = re.sub(r'<tool>.*?</tool>', '', content, flags=re.DOTALL)
-            
-            # Remove <thinking>...</thinking> blocks
-            display_content = re.sub(r'<thinking>.*?</thinking>', '', display_content, flags=re.DOTALL)
-            
-            display_content = display_content.strip()
-            
-            if not display_content and role == "assistant":
-                # If everything was filtered out, don't show an empty message
-                # (The tool execution status will be shown separately)
-                return
-
             messages_area = self.query_one("#chat-messages-area", VerticalScroll)
             self.message_count += 1
             
@@ -122,33 +104,16 @@ class ChatPanel(Container):
                 self.ai_response_widget._content_buffer = "[bold magenta]DevLog:[/bold magenta] "
                 # Also reset the plain text buffer for copying
                 self.last_ai_response_text = "" 
+                
                 messages_area.mount(self.ai_response_widget)
                 messages_area.scroll_end(animate=False)
                 
             elif role == "ai_stream":
                 # Append to existing AI response
                 if self.ai_response_widget:
-                    # We can't easily filter streaming content with regex because tags might be split across chunks.
-                    # For now, we will append raw content and let the final render handle it, 
-                    # OR we accept that streaming will show tags temporarily.
-                    # A robust stream filter is complex. 
-                    # Let's try to just append for now, but maybe we can suppress <tool> if we detect it starting?
-                    # Actually, ChatManager sends `[Running tool...]` as a separate chunk/message usually.
-                    
                     self.ai_response_widget._content_buffer += content
-                    self.last_ai_response_text += content # Accumulate plain text
-                    
-                    # Attempt to hide tags in the live update if possible, or just show raw
-                    # Ideally, we'd process `self.last_ai_response_text` with the regex and update the widget
-                    clean_text = re.sub(r'<tool>.*?(?:</tool>|$)', '', self.last_ai_response_text, flags=re.DOTALL)
-                    clean_text = re.sub(r'<thinking>.*?(?:</thinking>|$)', '', clean_text, flags=re.DOTALL)
-                    
-                    if clean_text.strip():
-                         self.ai_response_widget.update("[bold magenta]DevLog:[/bold magenta] " + clean_text)
-                    else:
-                        # If only thinking/tool so far, maybe show a "Thinking..." indicator?
-                        self.ai_response_widget.update("[bold magenta]DevLog:[/bold magenta] [dim]Thinking...[/dim]")
-                        
+                    self.last_ai_response_text += content # Accumulate plain text (cleaned)
+                    self.ai_response_widget.update(self.ai_response_widget._content_buffer)
                     messages_area.scroll_end(animate=False)
         except Exception as e:
             logger.error(f"Error adding message: {e}")
@@ -187,8 +152,6 @@ class ChatPanel(Container):
                 self.app.notify(f"Failed to copy: {e}", severity="error")
         else:
             self.app.notify("No response to copy yet.", severity="warning")
-
-    # ... (rest of methods)
 
     async def send_message(self, message: str) -> None:
         """Send a message and get AI response"""

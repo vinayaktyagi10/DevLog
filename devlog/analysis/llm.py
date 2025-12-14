@@ -53,7 +53,7 @@ def chunk_code(code: str, max_length: int = LLMConfig.MAX_CODE_LENGTH) -> list:
     return chunks
 
 
-async def analyze_code(prompt: str, code: str, language: str, stream: bool = False) -> str | AsyncGenerator[str, None]:
+async def analyze_code(prompt: str, code: str, language: str, stream: bool = False, temperature: float = 0.3, stop: list = None) -> str | AsyncGenerator[str, None]:
     """
     Analyze code using Ollama LLM
 
@@ -62,6 +62,8 @@ async def analyze_code(prompt: str, code: str, language: str, stream: bool = Fal
         code: Code to analyze
         language: Programming language
         stream: If True, return a streaming AsyncGenerator
+        temperature: Creativity parameter (lower is more deterministic)
+        stop: List of stop sequences
 
     Returns:
         Analysis text from LLM (str) or streaming AsyncGenerator (AsyncGenerator[str, None])
@@ -78,11 +80,11 @@ async def analyze_code(prompt: str, code: str, language: str, stream: bool = Fal
             results = []
             for i, chunk in enumerate(chunks):
                 chunk_prompt = f"{prompt}\n\nAnalyzing part {i+1} of {len(chunks)}:\n\n"
-                result = await _call_ollama(chunk_prompt, chunk, language, stream=False)
+                result = await _call_ollama(chunk_prompt, chunk, language, stream=False, temperature=temperature, stop=stop)
                 results.append(result)
             return "\n\n".join(results)
     else:
-        return await _call_ollama(prompt, code, language, stream)
+        return await _call_ollama(prompt, code, language, stream, temperature, stop)
 
 async def _non_streaming_chunked_analysis(prompt: str, code: str, language: str) -> str:
     """Perform non-streaming chunked analysis when streaming is requested for long code."""
@@ -95,7 +97,7 @@ async def _non_streaming_chunked_analysis(prompt: str, code: str, language: str)
     return "\n\n".join(results)
 
 
-async def _call_ollama(prompt: str, code: str, language: str, stream: bool) -> str | AsyncGenerator[str, None]:
+async def _call_ollama(prompt: str, code: str, language: str, stream: bool, temperature: float = 0.3, stop: list = None) -> str | AsyncGenerator[str, None]:
     """
     Make API call to Ollama
 
@@ -104,6 +106,8 @@ async def _call_ollama(prompt: str, code: str, language: str, stream: bool) -> s
         code: Code snippet
         language: Programming language
         stream: If True, return a streaming AsyncGenerator
+        temperature: Creativity parameter
+        stop: Stop sequences
 
     Returns:
         LLM response text (str) or streaming AsyncGenerator (AsyncGenerator[str, None])
@@ -114,16 +118,20 @@ async def _call_ollama(prompt: str, code: str, language: str, stream: bool) -> s
 {code}
 ```
 
-Provide specific, actionable feedback."""
+Provide specific, actionable feedback.""" if code else prompt
+
+    options = {
+        "temperature": temperature,
+        "top_p": 0.9,
+    }
+    if stop:
+        options["stop"] = stop
 
     payload = {
         "model": LLMConfig.MODEL,
         "prompt": full_prompt,
         "stream": stream,
-        "options": {
-            "temperature": 0.3,  # Lower for more focused analysis
-            "top_p": 0.9,
-        }
+        "options": options
     }
 
     try:
