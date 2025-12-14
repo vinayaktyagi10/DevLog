@@ -11,7 +11,7 @@ class ComparisonEngine:
     def __init__(self):
         pass
 
-    def compare_implementations(
+    async def compare_implementations(
         self,
         your_code: str,
         your_analysis: Dict,
@@ -49,7 +49,7 @@ class ComparisonEngine:
         comparison['gaps'] = self._find_gaps(your_analysis, web_practices, web_examples)
 
         # Identify different approaches
-        comparison['different_approaches'] = self._find_differences(
+        comparison['different_approaches'] = await self._find_differences(
             your_code, web_examples, topic
         )
 
@@ -149,7 +149,7 @@ class ComparisonEngine:
 
         return gaps[:10]  # Top 10 gaps
 
-    def _find_differences(self, your_code: str, web_examples: List[Dict], topic: str) -> List[Dict]:
+    async def _find_differences(self, your_code: str, web_examples: List[Dict], topic: str) -> List[Dict]:
         """Find where your approach differs from industry standard"""
         differences = []
 
@@ -171,7 +171,7 @@ Identify key differences in approach:
 DIFFERENCES:
 - [specific difference]: Your approach vs Standard approach"""
 
-                comparison_text = analyze_code(prompt, your_code[:500], 'text')
+                comparison_text = await analyze_code(prompt, your_code[:500], 'text')
 
                 # Parse differences
                 for line in comparison_text.split('\n'):

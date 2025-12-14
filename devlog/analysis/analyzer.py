@@ -18,13 +18,14 @@ class CodeAnalyzer:
             'patterns': self._pattern_analysis,
         }
 
-    def analyze_commit(self, commit_hash: str, analysis_type: str = 'quick') -> Optional[Dict]:
+    async def analyze_commit(self, commit_hash: str, analysis_type: str = 'quick', context: Optional[str] = None) -> Optional[Dict]:
         """
         Analyze a specific commit
 
         Args:
             commit_hash: Git commit hash (short or full)
             analysis_type: 'quick', 'deep', or 'patterns'
+            context: Optional context to improve analysis (e.g., best practices)
 
         Returns:
             Analysis results or None if commit not found
@@ -72,21 +73,28 @@ class CodeAnalyzer:
         changes = [dict(row) for row in c.fetchall()]
         conn.close()
 
-        # Check cache first
-        cached = self._get_cached_analysis(commit_id, analysis_type)
-        if cached:
-            return cached
+        # Check cache first (skip cache if context is provided, as it modifies the analysis)
+        if not context:
+            cached = self._get_cached_analysis(commit_id, analysis_type)
+            if cached:
+                return cached
 
         # Perform analysis
         analyzer_func = self.analysis_types.get(analysis_type, self._quick_analysis)
-        result = analyzer_func(commit, changes)
+        
+        # Pass context if the analyzer function supports it (quick and deep do)
+        if analysis_type in ['quick', 'deep']:
+            result = await analyzer_func(commit, changes, context)
+        else:
+            result = await analyzer_func(commit, changes)
 
-        # Cache the result
-        self._cache_analysis(commit_id, analysis_type, result)
+        # Cache the result (only if generic, context-specific analysis shouldn't overwrite generic cache)
+        if not context:
+            self._cache_analysis(commit_id, analysis_type, result)
 
         return result
 
-    def analyze_file(self, file_path: str, code: str, language: str) -> Dict:
+    async def analyze_file(self, file_path: str, code: str, language: str) -> Dict:
         """
         Analyze current state of a file
 
@@ -110,7 +118,7 @@ class CodeAnalyzer:
         from devlog.analysis.llm import analyze_code
 
         prompt = self._build_file_analysis_prompt(context)
-        analysis_text = analyze_code(prompt, code, language)
+        analysis_text = await analyze_code(prompt, code, language)
 
         # Parse and structure the response
         result = self._parse_analysis_response(analysis_text)
@@ -120,7 +128,7 @@ class CodeAnalyzer:
 
         return result
 
-    def batch_analyze(self, repo_name: str, limit: int = 10) -> List[Dict]:
+    async def batch_analyze(self, repo_name: str, limit: int = 10) -> List[Dict]:
         """
         Analyze last N commits in a repository
 
@@ -149,13 +157,13 @@ class CodeAnalyzer:
 
         results = []
         for commit_hash in commits:
-            analysis = self.analyze_commit(commit_hash, 'quick')
+            analysis = await self.analyze_commit(commit_hash, 'quick')
             if analysis:
                 results.append(analysis)
 
         return results
 
-    def _quick_analysis(self, commit: Dict, changes: List[Dict]) -> Dict:
+    async def _quick_analysis(self, commit: Dict, changes: List[Dict], context_str: Optional[str] = None) -> Dict:
         """Quick analysis: summary + immediate issues"""
         from devlog.analysis.llm import analyze_code
 
@@ -176,8 +184,8 @@ class CodeAnalyzer:
             if not change['code_after'] or change['language'] not in ['python', 'javascript', 'typescript', 'java']:
                 continue
 
-            prompt = self._build_quick_prompt(change, commit['message'])
-            analysis_text = analyze_code(prompt, change['code_after'], change['language'])
+            prompt = self._build_quick_prompt(change, commit['message'], context_str)
+            analysis_text = await analyze_code(prompt, change['code_after'], change['language'])
 
             parsed = self._parse_analysis_response(analysis_text)
             issues.extend(parsed.get('issues', []))
@@ -194,7 +202,7 @@ class CodeAnalyzer:
             'analyzed_at': datetime.now().isoformat()
         }
 
-    def _deep_analysis(self, commit: Dict, changes: List[Dict]) -> Dict:
+    async def _deep_analysis(self, commit: Dict, changes: List[Dict], context_str: Optional[str] = None) -> Dict:
         """Deep analysis: patterns, anti-patterns, complexity"""
         from devlog.analysis.llm import analyze_code
 
@@ -207,8 +215,8 @@ class CodeAnalyzer:
             if not change['code_after'] or change['language'] not in ['python', 'javascript', 'typescript', 'java']:
                 continue
 
-            prompt = self._build_deep_prompt(change)
-            analysis_text = analyze_code(prompt, change['code_after'], change['language'])
+            prompt = self._build_deep_prompt(change, context_str)
+            analysis_text = await analyze_code(prompt, change['code_after'], change['language'])
 
             parsed = self._parse_deep_analysis(analysis_text)
             patterns_found.extend(parsed.get('patterns', []))
@@ -230,7 +238,7 @@ class CodeAnalyzer:
             'analyzed_at': datetime.now().isoformat()
         }
 
-    def _pattern_analysis(self, commit: Dict, changes: List[Dict]) -> Dict:
+    async def _pattern_analysis(self, commit: Dict, changes: List[Dict]) -> Dict:
         """Pattern analysis: detect coding patterns and habits"""
         from devlog.analysis.llm import analyze_code
 
@@ -246,7 +254,7 @@ class CodeAnalyzer:
                 continue
 
             prompt = self._build_pattern_prompt(change)
-            analysis_text = analyze_code(prompt, change['code_after'], change['language'])
+            analysis_text = await analyze_code(prompt, change['code_after'], change['language'])
 
             parsed = self._parse_pattern_analysis(analysis_text)
             for key in patterns:
@@ -261,15 +269,19 @@ class CodeAnalyzer:
             'analyzed_at': datetime.now().isoformat()
         }
 
-    def _build_quick_prompt(self, change: Dict, commit_message: str) -> str:
+    def _build_quick_prompt(self, change: Dict, commit_message: str, context: Optional[str] = None) -> str:
         """Build prompt for quick analysis"""
-        return f"""Analyze this code change and identify immediate issues and quick improvements.
+        prompt = f"""Analyze this code change and identify immediate issues and quick improvements.
 
 Commit message: {commit_message}
 File: {change['file_path']}
 Language: {change['language']}
 Changes: +{change['lines_added']} -{change['lines_removed']}
+"""
+        if context:
+            prompt += f"\n{context}\n"
 
+        prompt += """
 Focus on:
 1. Potential bugs or errors
 2. Security vulnerabilities
@@ -284,14 +296,19 @@ SUGGESTIONS:
 - [specific actionable suggestion]
 
 Keep it concise and actionable."""
+        return prompt
 
-    def _build_deep_prompt(self, change: Dict) -> str:
+    def _build_deep_prompt(self, change: Dict, context: Optional[str] = None) -> str:
         """Build prompt for deep analysis"""
-        return f"""Perform a deep code analysis focusing on design patterns, anti-patterns, and complexity.
+        prompt = f"""Perform a deep code analysis focusing on design patterns, anti-patterns, and complexity.
 
 File: {change['file_path']}
 Language: {change['language']}
+"""
+        if context:
+            prompt += f"\n{context}\n"
 
+        prompt += """
 Analyze:
 1. Design patterns used (factory, singleton, observer, etc.)
 2. Anti-patterns present (god object, spaghetti code, etc.)
@@ -307,6 +324,7 @@ ANTI-PATTERNS:
 
 COMPLEXITY:
 - [complexity issue and recommendation]"""
+        return prompt
 
     def _build_pattern_prompt(self, change: Dict) -> str:
         """Build prompt for pattern analysis"""

@@ -24,7 +24,7 @@ class ReviewPipeline:
         self.extractor = ContentExtractor()
         self.comparer = ComparisonEngine()
 
-    def review_topic(
+    async def review_topic(
         self,
         topic: str,
         language: Optional[str] = None,
@@ -66,13 +66,6 @@ class ReviewPipeline:
         review['commit_hashes'] = [c['short_hash'] for c in commits]
         review['steps'].append(f"Found {len(commits)} relevant commits")
 
-        # Step 2: Analyze your code
-        print(f"   Analyzing your implementation...")
-        analysis_type = 'deep' if deep_analysis else 'quick'
-        your_analysis = self._analyze_commits(commits, analysis_type)
-        review['your_analysis'] = your_analysis
-        review['steps'].append(f"Analyzed {len(commits)} commits")
-
         # Extract code from commits for comparison
         your_code = self._extract_commit_code(commits)
         review['your_code_summary'] = {
@@ -80,7 +73,7 @@ class ReviewPipeline:
             'files_analyzed': len(your_code)
         }
 
-        # Step 3: Search web for best practices
+        # Step 2: Search web for best practices (Moved up for context injection)
         print(f"   Searching web for best practices...")
         search_results = self.searcher.search_topic(topic, language, num_results=10)
         review['web_search_results'] = len(search_results)
@@ -89,14 +82,14 @@ class ReviewPipeline:
         if not search_results:
             review['steps'].append("Warning: No web results found")
 
-        # Step 4: Scrape top sources
+        # Step 3: Scrape top sources
         print(f"   Scraping top sources...")
         top_urls = [r['url'] for r in search_results[:5]]  # Top 5
         scraped_content = self.scraper.scrape_multiple(top_urls)
         review['scraped_sources'] = len(scraped_content)
         review['steps'].append(f"Scraped {len(scraped_content)} sources")
 
-        # Step 5: Extract best practices and examples
+        # Step 4: Extract best practices and examples
         print(f"   Extracting best practices...")
         web_practices = []
         web_examples = []
@@ -112,9 +105,21 @@ class ReviewPipeline:
         review['web_examples_found'] = len(web_examples)
         review['steps'].append(f"Extracted {len(web_practices)} practices, {len(web_examples)} examples")
 
+        # Prepare context from web practices
+        web_context = "\n".join([f"- {p}" for p in web_practices[:10]])
+        if web_context:
+            web_context = f"Consider these industry best practices during analysis:\n{web_context}"
+
+        # Step 5: Analyze your code (with context)
+        print(f"   Analyzing your implementation...")
+        analysis_type = 'deep' if deep_analysis else 'quick'
+        your_analysis = await self._analyze_commits(commits, analysis_type, web_context)
+        review['your_analysis'] = your_analysis
+        review['steps'].append(f"Analyzed {len(commits)} commits")
+
         # Step 6: Compare your code with industry standards
         print(f"   Comparing with industry standards...")
-        comparison = self.comparer.compare_implementations(
+        comparison = await self.comparer.compare_implementations(
             your_code=' '.join(your_code),
             your_analysis=your_analysis,
             web_examples=web_examples,
@@ -153,14 +158,24 @@ class ReviewPipeline:
 
         return commits
 
-    def _analyze_commits(self, commits: List[Dict], analysis_type: str) -> Dict:
+    async def _analyze_commits(self, commits: List[Dict], analysis_type: str, context: Optional[str] = None) -> Dict:
         """Analyze multiple commits and aggregate results"""
         all_issues = []
         all_suggestions = []
         all_patterns = []
 
         for commit in commits:
-            analysis = self.analyzer.analyze_commit(commit['short_hash'], analysis_type)
+            # Pass context to analyzer if available (requires updating CodeAnalyzer.analyze_commit or prompt injection)
+            # Since we can't easily change CodeAnalyzer signature without breaking other things, 
+            # we will create a tailored prompt if context is present, or append it to the commit message/code for now.
+            
+            # Temporary strategy: Use suggest_improvements with context if deep analysis
+            # Or rely on standard analysis but append context to the code passed (hacky but effective without deeper refactor)
+            
+            # Better approach: We'll modify analyzer.py next to accept context.
+            # For now, let's assume we pass it.
+            
+            analysis = await self.analyzer.analyze_commit(commit['short_hash'], analysis_type, context=context)
             if analysis:
                 all_issues.extend(analysis.get('issues', []))
                 all_suggestions.extend(analysis.get('suggestions', []))
@@ -201,30 +216,31 @@ class ReviewPipeline:
 
         # Prepare data
         commit_ids = json.dumps(review.get('commit_hashes', []))
-        your_analysis = json.dumps(review.get('your_analysis', {}))
+        
+        # web_sources is expected to be TEXT, we'll store the count summary as JSON
         web_sources = json.dumps([{
             'title': 'Web sources',
             'count': review.get('scraped_sources', 0)
         }])
+        
         comparison = json.dumps(review.get('comparison', {}))
 
         # Extract recommendations from comparison
         recommendations = review.get('comparison', {}).get('recommendations', [])
         recommendations_json = json.dumps(recommendations)
 
+        # Match columns: topic, commits_analyzed, your_code, web_sources, comparison, recommendations, created_at
         c.execute("""
             INSERT INTO reviews (
-                topic, commits_analyzed, your_code, your_analysis,
-                web_sources, web_best_practices, comparison,
+                topic, commits_analyzed, your_code,
+                web_sources, comparison,
                 recommendations, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
             review['topic'],
             commit_ids,
             json.dumps(review.get('your_code_summary', {})),
-            your_analysis,
             web_sources,
-            json.dumps(review.get('web_practices_found', 0)),
             comparison,
             recommendations_json,
             review['completed_at']
@@ -295,11 +311,11 @@ class ReviewPipeline:
         lines = []
 
         lines.append(f"# Code Review: {review['topic']}\n")
-        lines.append(f"**Date**: {review.get('completed_at', '')[:10]}\n")
+        lines.append(f"**Date**: {review.get('created_at', '')[:10]}\n")
 
         # Summary
         lines.append("## Summary\n")
-        lines.append(f"- **Commits analyzed**: {review.get('commits_found', 0)}")
+        lines.append(f"- **Commits analyzed**: {review.get('commits_analyzed', 0)}")
         lines.append(f"- **Web sources**: {review.get('scraped_sources', 0)}")
         lines.append(f"- **Best practices found**: {review.get('web_practices_found', 0)}")
         lines.append(f"- **Code examples**: {review.get('web_examples_found', 0)}\n")

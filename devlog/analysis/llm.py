@@ -3,7 +3,7 @@ LLM Integration for Code Analysis using Ollama
 """
 import requests
 import json
-from typing import Optional, Dict
+from typing import Optional, Dict, AsyncGenerator
 import re
 
 
@@ -53,7 +53,7 @@ def chunk_code(code: str, max_length: int = LLMConfig.MAX_CODE_LENGTH) -> list:
     return chunks
 
 
-def analyze_code(prompt: str, code: str, language: str) -> str:
+async def analyze_code(prompt: str, code: str, language: str, stream: bool = False) -> str | AsyncGenerator[str, None]:
     """
     Analyze code using Ollama LLM
 
@@ -61,29 +61,41 @@ def analyze_code(prompt: str, code: str, language: str) -> str:
         prompt: Analysis instructions
         code: Code to analyze
         language: Programming language
+        stream: If True, return a streaming AsyncGenerator
 
     Returns:
-        Analysis text from LLM
+        Analysis text from LLM (str) or streaming AsyncGenerator (AsyncGenerator[str, None])
     """
-    # Check if code is too long
     if len(code) > LLMConfig.MAX_CODE_LENGTH:
-        # Analyze in chunks and combine
-        chunks = chunk_code(code)
-        results = []
-
-        for i, chunk in enumerate(chunks):
-            chunk_prompt = f"{prompt}\n\nAnalyzing part {i+1} of {len(chunks)}:\n\n"
-            result = _call_ollama(chunk_prompt, chunk, language)
-            if result:
+        # For long code, streaming might be complex to combine chunks.
+        # For simplicity, if streaming is requested and code is long,
+        # we'll do non-streaming chunked analysis.
+        if stream:
+            return await _non_streaming_chunked_analysis(prompt, code, language)
+        else:
+            # Existing non-streaming chunked logic
+            chunks = chunk_code(code)
+            results = []
+            for i, chunk in enumerate(chunks):
+                chunk_prompt = f"{prompt}\n\nAnalyzing part {i+1} of {len(chunks)}:\n\n"
+                result = await _call_ollama(chunk_prompt, chunk, language, stream=False)
                 results.append(result)
-
-        # Combine results
-        return "\n\n".join(results)
+            return "\n\n".join(results)
     else:
-        return _call_ollama(prompt, code, language)
+        return await _call_ollama(prompt, code, language, stream)
+
+async def _non_streaming_chunked_analysis(prompt: str, code: str, language: str) -> str:
+    """Perform non-streaming chunked analysis when streaming is requested for long code."""
+    chunks = chunk_code(code)
+    results = []
+    for i, chunk in enumerate(chunks):
+        chunk_prompt = f"{prompt}\n\nAnalyzing part {i+1} of {len(chunks)}:\n\n"
+        result = await _call_ollama(chunk_prompt, chunk, language, stream=False)
+        results.append(result)
+    return "\n\n".join(results)
 
 
-def _call_ollama(prompt: str, code: str, language: str) -> str:
+async def _call_ollama(prompt: str, code: str, language: str, stream: bool) -> str | AsyncGenerator[str, None]:
     """
     Make API call to Ollama
 
@@ -91,9 +103,10 @@ def _call_ollama(prompt: str, code: str, language: str) -> str:
         prompt: Analysis prompt
         code: Code snippet
         language: Programming language
+        stream: If True, return a streaming AsyncGenerator
 
     Returns:
-        LLM response text
+        LLM response text (str) or streaming AsyncGenerator (AsyncGenerator[str, None])
     """
     full_prompt = f"""{prompt}
 
@@ -106,7 +119,7 @@ Provide specific, actionable feedback."""
     payload = {
         "model": LLMConfig.MODEL,
         "prompt": full_prompt,
-        "stream": False,
+        "stream": stream,
         "options": {
             "temperature": 0.3,  # Lower for more focused analysis
             "top_p": 0.9,
@@ -117,21 +130,71 @@ Provide specific, actionable feedback."""
         response = requests.post(
             LLMConfig.BASE_URL,
             json=payload,
-            timeout=LLMConfig.TIMEOUT
+            timeout=LLMConfig.TIMEOUT,
+            stream=stream # Enable streaming for requests library
         )
 
         if response.status_code != 200:
-            return f"Error: LLM returned status {response.status_code}"
+            error_msg = f"Error: LLM returned status {response.status_code} - {response.text}"
+            if stream:
+                async def error_generator():
+                    yield error_msg
+                return error_generator()
+            else:
+                return error_msg
 
-        data = response.json()
-        return data.get("response", "No response from LLM")
+        if stream:
+            return _stream_response_generator(response)
+        else:
+            data = response.json()
+            return data.get("response", "No response from LLM")
 
     except requests.exceptions.Timeout:
-        return "Error: LLM request timed out"
+        error_msg = "Error: LLM request timed out"
+        if stream:
+            async def error_generator():
+                yield error_msg
+            return error_generator()
+        else:
+            return error_msg
     except requests.exceptions.ConnectionError:
-        return "Error: Could not connect to Ollama. Is it running?"
+        error_msg = "Error: Could not connect to Ollama. Is it running?"
+        if stream:
+            async def error_generator():
+                yield error_msg
+            return error_generator()
+        else:
+            return error_msg
     except Exception as e:
-        return f"Error: {str(e)}"
+        error_msg = f"Error: {str(e)}"
+        if stream:
+            async def error_generator():
+                yield error_msg
+            return error_generator()
+        else:
+            return error_msg
+
+async def _stream_response_generator(response: requests.Response) -> AsyncGenerator[str, None]:
+    """Helper to yield streaming content from Ollama response."""
+    for chunk in response.iter_content(chunk_size=None): # chunk_size=None means iterate over full response if not streaming
+        if chunk:
+            try:
+                # Each chunk might contain multiple JSON objects or partial ones
+                decoded_chunk = chunk.decode('utf-8')
+                for line in decoded_chunk.splitlines():
+                    if line.strip(): # Avoid empty lines
+                        data = json.loads(line)
+                        if "response" in data:
+                            yield data["response"]
+                        if data.get("done"):
+                            return # End of stream
+            except json.JSONDecodeError:
+                # Handle incomplete JSON objects if they arrive in separate chunks
+                # For simplicity, we'll try to parse each line as a full object
+                # In a real app, you might buffer and parse
+                yield f"[ERROR: Partial JSON chunk: {chunk.decode('utf-8')}]"
+            except Exception as e:
+                yield f"[ERROR processing stream: {e}]"
 
 
 def test_connection() -> bool:
@@ -161,7 +224,7 @@ def test_connection() -> bool:
         return False
 
 
-def analyze_quick(code: str, language: str, file_path: str) -> Dict:
+async def analyze_quick(code: str, language: str, file_path: str) -> Dict:
     """
     Quick analysis: find immediate issues
 
@@ -188,11 +251,11 @@ ISSUES:
 SUGGESTIONS:
 - [actionable fix]"""
 
-    result = analyze_code(prompt, code, language)
+    result = await analyze_code(prompt, code, language)
     return _parse_structured_response(result)
 
 
-def analyze_deep(code: str, language: str) -> Dict:
+async def analyze_deep(code: str, language: str) -> Dict:
     """
     Deep analysis: patterns, architecture, complexity
 
@@ -221,11 +284,11 @@ ANTI_PATTERNS:
 COMPLEXITY:
 - [issue]: [recommendation]"""
 
-    result = analyze_code(prompt, code, language)
+    result = await analyze_code(prompt, code, language)
     return _parse_structured_response(result)
 
 
-def suggest_improvements(code: str, language: str, context: str = "") -> Dict:
+async def suggest_improvements(code: str, language: str, context: str = "") -> Dict:
     """
     Generate specific improvement suggestions
 
@@ -257,11 +320,11 @@ ALTERNATIVES:
 BEST_PRACTICES:
 - [practice not followed and how to fix]"""
 
-    result = analyze_code(prompt, code, language)
+    result = await analyze_code(prompt, code, language)
     return _parse_structured_response(result)
 
 
-def compare_with_best_practices(code: str, language: str, topic: str) -> str:
+async def compare_with_best_practices(code: str, language: str, topic: str) -> str:
     """
     Compare code against best practices for a specific topic
 
@@ -284,7 +347,7 @@ Analyze:
 
 Provide a detailed comparison."""
 
-    return analyze_code(prompt, code, language)
+    return await analyze_code(prompt, code, language)
 
 
 def _parse_structured_response(response: str) -> Dict:
