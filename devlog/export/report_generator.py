@@ -14,8 +14,8 @@ class ReportGenerator:
         lines = []
 
         lines.append(f"# Code Review: {review['topic']}\n")
-        lines.append(f"**Date**: {review.get('completed_at', '')[:10]}\n")
-        lines.append(f"**Commits Analyzed**: {review.get('commits_found', 0)}\n")
+        lines.append(f"**Date**: {review.get('created_at', '')[:10]}\n")
+        lines.append(f"**Commits Analyzed**: {review.get('commits_analyzed', 0)}\n")
 
         # Your implementation
         lines.append("## Your Implementation\n")

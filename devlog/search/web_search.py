@@ -172,25 +172,39 @@ class WebSearcher:
 
         return results
 
-    def generate_query(self, topic: str, language: str = None, year: int = 2024) -> str:
+    def generate_query(self, topic: str, language: str = None) -> str:
         """
-        Generate optimized search query
+        Generate optimized search query with technical context
 
         Args:
-            topic: Topic to search for (e.g., "authentication", "JWT")
+            topic: Topic to search for (e.g., "authentication", "JWT", "chore")
             language: Programming language filter
-            year: Year for recency
 
         Returns:
             Optimized search query string
         """
-        query_parts = [topic, "best practices"]
-
+        # Always enforce technical context
+        technical_keywords = ["best practices", "programming", "software engineering"]
+        
+        # If topic is a common ambiguous term, add specific qualifiers
+        ambiguous_terms = {
+            'chore': 'git commit message',
+            'feat': 'git commit message',
+            'fix': 'git commit message',
+            'refactor': 'code refactoring',
+            'ci': 'continuous integration',
+            'docs': 'documentation'
+        }
+        
+        refined_topic = ambiguous_terms.get(topic.lower(), topic)
+        
+        query_parts = [refined_topic]
+        
         if language:
             query_parts.append(language)
-
-        # Add year for recency
-        query_parts.append(str(year))
+            
+        # Add technical keywords to ensure we get dev-related results
+        query_parts.extend(technical_keywords)
 
         return " ".join(query_parts)
 
