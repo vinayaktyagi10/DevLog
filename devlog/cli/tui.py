@@ -27,8 +27,17 @@ from devlog.search.web_search import WebSearcher
 from devlog.analysis.review import ReviewPipeline
 import asyncio
 import webbrowser
-from devlog.analysis.chat_manager import ChatManager
 
+
+import logging
+
+# Setup debug logging
+logging.basicConfig(
+    filename='devlog_tui_debug.log',
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # ==================== MODAL SCREENS ====================
 
@@ -669,95 +678,6 @@ class WebSearchPanel(VerticalScroll):
         widget.update(Text.from_markup("\n".join(lines)))
 
 
-class ChatPanel(Container):
-    """Chatbot interface with commit and web access"""
-
-    def __init__(self, chat_manager: ChatManager, **kwargs):
-        super().__init__(**kwargs)
-        self.chat_manager = chat_manager
-        self.chat_display = VerticalScroll(id="chat-display")
-        self.ai_response_static = None # To update streaming responses
-
-    def compose(self) -> ComposeResult:
-        yield self.chat_display
-        with Horizontal(id="chat-input-container"):
-            yield Input(placeholder="Ask DevLog a question...", id="chat-input")
-            yield Button("Send", variant="primary", id="send-btn", classes="chat-actions")
-            yield Button("Clear", id="clear-btn", classes="chat-actions")
-
-    def on_mount(self) -> None:
-        self.query_one("#chat-input", Input).focus()
-        self.add_message("system", "Hello! I'm DevLog. How can I help you today?")
-        self.app.notify("ChatPanel mounted. Type a message and press Enter or Send.", severity="information")
-        
-    def add_message(self, role: str, content: str) -> None:
-        """Add a message to the chat display."""
-        if role == "user":
-            label = Label(f"[b blue]You:[/b blue] {content}", markup=True, classes="chat-msg")
-            self.chat_display.mount(label)
-            self.chat_display.scroll_end(animate=False)
-            self.ai_response_static = None # Reset for next AI response
-        elif role == "system":
-            label = Label(f"[b green]System:[/b green] {content}", markup=True, classes="chat-msg")
-            self.chat_display.mount(label)
-            self.chat_display.scroll_end(animate=False)
-            self.ai_response_static = None
-        elif role == "ai_start":
-            # Create a new static widget for streaming AI response
-            initial_text = f"[b magenta]DevLog:[/b magenta] "
-            self.ai_response_static = Label(initial_text, markup=True, classes="chat-msg")
-            self.chat_display.mount(self.ai_response_static)
-            self.chat_display.scroll_end(animate=False)
-            # Store the current content within the label's own custom attribute for streaming
-            self.ai_response_static._current_content = initial_text
-        elif role == "ai_stream":
-            if self.ai_response_static and hasattr(self.ai_response_static, '_current_content'):
-                # Append to the accumulated content and update the label
-                self.ai_response_static._current_content += content
-                self.ai_response_static.update(self.ai_response_static._current_content)
-                self.chat_display.scroll_end(animate=False)
-
-    async def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id == "chat-input":
-            user_message = event.input.value
-            event.input.value = "" # Clear input
-            await self.send_chat_message(user_message)
-
-    async def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "send-btn":
-            input_widget = self.query_one("#chat-input", Input)
-            user_message = input_widget.value
-            input_widget.value = ""
-            await self.send_chat_message(user_message)
-        elif event.button.id == "clear-btn":
-            self.chat_manager.clear_history()
-            self.chat_display.remove_children() # Use remove_children for VerticalScroll
-            self.add_message("system", "Chat history cleared.")
-            self.add_message("system", "Hello! I'm DevLog. How can I help you today?")
-
-    async def send_chat_message(self, user_message: str) -> None:
-        if not user_message.strip():
-            return
-        
-        self.add_message("user", user_message)
-        self.add_message("ai_start", "") # Placeholder for streaming
-        
-        # Run LLM interaction in a worker to keep UI responsive
-        self.run_worker(self._get_ai_response(user_message))
-
-    async def _get_ai_response(self, user_message: str) -> None:
-        """Get streaming AI response and update UI."""
-        try:
-            response_generator = self.chat_manager.send_message(user_message)
-            async for chunk in response_generator:
-                self.add_message("ai_stream", chunk)
-        except Exception as e:
-            self.add_message("system", f"[ERROR]: {e}")
-            self.app.notify(f"Chat error: {e}", severity="error")
-        finally:
-            self.query_one("#chat-input", Input).focus()
-
-
 # ==================== MAIN APP ====================
 
 class DevLogTUI(App):
@@ -810,41 +730,6 @@ class DevLogTUI(App):
         margin: 0 1;
     }
 
-    ChatPanel {
-        layout: vertical;
-        height: 100%;
-    }
-
-    #chat-display {
-        background: $surface;
-        border: solid $primary;
-        height: 1fr;
-        padding: 1;
-        overflow-y: auto;
-    }
-
-    #chat-input-container {
-        height: auto;
-        padding-top: 1;
-        padding-bottom: 0;
-    }
-
-    #chat-input {
-        width: 1fr;
-        background: $boost;
-        color: $text;
-        border: tall $primary;
-    }
-
-    #chat-actions {
-        width: auto;
-    }
-
-    .chat-msg {
-        width: 100%;
-        height: auto;
-    }
-
     ListView {
         height: 100%;
     }
@@ -857,7 +742,6 @@ class DevLogTUI(App):
         Binding("3", "switch_tab('review')", "Review", show=True),
         Binding("4", "switch_tab('search')", "Search", show=True),
         Binding("5", "switch_tab('web')", "Web", show=True),
-        Binding("6", "switch_tab('chat')", "Chat", show=True),
 
         # Actions
         Binding("a", "analyze", "Analyze", show=True),
@@ -904,10 +788,6 @@ class DevLogTUI(App):
             # Web Tab
             with TabPane("Web", id="web"):
                 yield WebSearchPanel(id="web-panel")
-
-            # Chat Tab
-            with TabPane("Chat", id="chat"):
-                yield ChatPanel(id="chat-panel", chat_manager=ChatManager())
 
         yield Footer()
 
