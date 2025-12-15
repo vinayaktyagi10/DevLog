@@ -44,7 +44,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             commit_id INTEGER NOT NULL,
             file_path TEXT NOT NULL,
-            change_type TEXT NOT NULL, -- added, modified, deleted, renamed
+            change_type TEXT NOT NULL,
             language TEXT,
             diff_text TEXT,
             code_before TEXT,
@@ -60,11 +60,11 @@ def init_db():
         CREATE TABLE IF NOT EXISTS analyses (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             commit_id INTEGER NOT NULL,
-            analysis_type TEXT NOT NULL, -- quick, deep, comparison
+            analysis_type TEXT NOT NULL,
             summary TEXT,
-            issues TEXT, -- JSON array
-            suggestions TEXT, -- JSON array
-            patterns TEXT, -- JSON array
+            issues TEXT,
+            suggestions TEXT,
+            patterns TEXT,
             analyzed_at TEXT NOT NULL,
             FOREIGN KEY(commit_id) REFERENCES git_commits(id)
         );
@@ -74,9 +74,9 @@ def init_db():
         CREATE TABLE IF NOT EXISTS reviews (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             topic TEXT NOT NULL,
-            commits_analyzed TEXT, -- JSON array of commit IDs
+            commits_analyzed TEXT,
             your_code TEXT,
-            web_sources TEXT, -- JSON array
+            web_sources TEXT,
             comparison TEXT,
             recommendations TEXT,
             created_at TEXT NOT NULL

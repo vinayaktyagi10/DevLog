@@ -1,353 +1,298 @@
-import json
-import ast
-import asyncio
-from typing import Dict, Any, Optional, AsyncGenerator, List
+"""
+DevLog Chat Manager - Complete Rewrite with Deep Search + Smart Tool Routing
+"""
 
-import jsonschema
+import asyncio
+import subprocess
+from typing import Optional, AsyncGenerator, List, Dict, Any
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
 
 from devlog.analysis.llm import analyze_code, LLMConfig
-from devlog.core.search import search_commits as keyword_search_commits
+from devlog.core.search_unified import smart_search
 from devlog.search.web_search import WebSearcher
+from devlog.analysis.tool_router import ToolRouter, Intent, ToolType, ToolDecision
 
 
-# ----------------------------
-# Tool schema (strict)
-# ----------------------------
-
-TOOL_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "tool": {"type": ["string", "null"]},
-        "args": {"type": "object"}
-    },
-    "required": ["tool"]
-}
+@dataclass
+class ConversationContext:
+    user_name: str
+    user_email: str
+    current_date: str
+    recent_commits: str
+    repo_info: str
 
 
-# ----------------------------
-# Robust JSON extraction
-# ----------------------------
+@dataclass
+class Message:
+    role: str
+    content: str
+    tool_name: Optional[str] = None
 
-def extract_first_object(text: str) -> Optional[str]:
-    stack = []
-    start = None
-
-    for i, ch in enumerate(text):
-        if ch == "{":
-            if start is None:
-                start = i
-            stack.append("{")
-        elif ch == "}" and stack:
-            stack.pop()
-            if not stack and start is not None:
-                return text[start:i + 1]
-    return None
-
-
-def parse_tool_call(raw: str) -> Optional[Dict[str, Any]]:
-    candidate = extract_first_object(raw)
-    if not candidate:
-        return None
-
-    # JSON first
-    try:
-        data = json.loads(candidate)
-        jsonschema.validate(instance=data, schema=TOOL_SCHEMA)
-        return data
-    except Exception:
-        pass
-
-    # Python literal fallback (single quotes)
-    try:
-        data = ast.literal_eval(candidate)
-        if isinstance(data, dict):
-            jsonschema.validate(instance=data, schema=TOOL_SCHEMA)
-            return data
-    except Exception:
-        pass
-
-    return None
-
-
-# ----------------------------
-# ChatManager (rewritten)
-# ----------------------------
 
 class ChatManager:
     def __init__(self, model: str = LLMConfig.MODEL):
         self.model = model
-        self.history: List[Dict[str, str]] = []
+        self.history: List[Message] = []
         self.web = WebSearcher()
+        self.router = ToolRouter()
+        self.max_history = 5
+        self.context_cache: Optional[ConversationContext] = None
+        self.context_cache_time: Optional[datetime] = None
 
-    def _get_user_context(self) -> Dict:
-        """Retrieve user name, email, and recent commit summary."""
-        import subprocess
-        
-        context = {"name": "User", "email": "unknown", "recent_commits": "No recent commits found."}
-        
+    def _get_context(self) -> ConversationContext:
+        now = datetime.now()
+        if self.context_cache and self.context_cache_time:
+            if (now - self.context_cache_time).seconds < 300:
+                return self.context_cache
+
+        context = ConversationContext(
+            user_name="User", user_email="unknown",
+            current_date=now.strftime("%Y-%m-%d %H:%M"),
+            recent_commits="No recent commits.",
+            repo_info="Not in a git repository"
+        )
+
         try:
-            name = subprocess.check_output(["git", "config", "--get", "user.name"], text=True).strip()
-            email = subprocess.check_output(["git", "config", "--get", "user.email"], text=True).strip()
-            context["name"] = name
-            context["email"] = email
-            
-            # Get recent commit summary (increased to 25 for better context)
-            commits = subprocess.check_output(["git", "log", "-n", "25", "--oneline"], text=True).strip()
+            name = subprocess.check_output(["git", "config", "--get", "user.name"], text=True, stderr=subprocess.DEVNULL).strip()
+            email = subprocess.check_output(["git", "config", "--get", "user.email"], text=True, stderr=subprocess.DEVNULL).strip()
+            context.user_name = name
+            context.user_email = email
+
+            try:
+                repo = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True, stderr=subprocess.DEVNULL).strip()
+                repo_name = repo.split('/')[-1]
+                branch = subprocess.check_output(["git", "branch", "--show-current"], text=True, stderr=subprocess.DEVNULL).strip()
+                context.repo_info = f"Repo: {repo_name} (branch: {branch})"
+            except:
+                pass
+
+            commits = subprocess.check_output(["git", "log", "-n", "25", "--pretty=format:%h | %s | %ar"], text=True, stderr=subprocess.DEVNULL).strip()
             if commits:
-                context["recent_commits"] = f"Recent 25 commits:\n{commits}"
-                
-        except Exception:
+                context.recent_commits = f"Recent commits:\n{commits}"
+        except:
             pass
-            
+
+        self.context_cache = context
+        self.context_cache_time = now
         return context
 
-    # -------- SYSTEM PROMPTS --------
+    async def _classify_intent(self, user_message: str) -> Intent:
+        context = self._get_context()
+        prompt = f"""Classify intent. Output ONLY the category name.
 
-    def _decision_prompt(self, user_message: str) -> str:
-        user_context = self._get_user_context()
-        
-        return (
-            "You are a routing engine for a local DevLog AI assistant. "
-            f"You are assisting {user_context['name']} ({user_context['email']}). "
-            "Your organization is SDC.\n"
-            "Decide if a tool is required to answer the user's message.\n\n"
-            "Output ONLY a JSON object in this form:\n"
-            '{ "tool": "search_commits" | "web_search" | null, "args": {...} }\n\n'
-            "Rules:\n"
-            "- No explanation\n"
-            "- No reasoning\n"
-            "- No markdown\n"
-            "- Use double quotes for JSON\n\n"
-            f"User message:\n{user_message}\n\n"
-            f"Context:\n{user_context['recent_commits']}"
-        )
+User: {context.user_name}
+Message: "{user_message}"
 
-    def _final_system_prompt(self) -> str:
-        user_context = self._get_user_context()
-        return (
-            "You are DevLog, a local CLI coding assistant.\n"
-            f"User: {user_context['name']} ({user_context['email']}). Org: SDC.\n"
-            "Answer clearly and concisely using the provided context.\n"
-            "Do NOT reveal internal reasoning.\n"
-            "Do NOT explicitly mention tool usage (e.g., 'I used the tool...'). Just give the answer.\n"
-        )
+Categories:
+FACTUAL_LOCAL - Questions about their commits/code
+FACTUAL_EXTERNAL - Questions about docs/libraries/programming
+EVALUATIVE - Quality assessments
+HYPOTHETICAL - Design discussions
+CHAT - Greetings/chitchat
+INVALID - False premises
 
-    # -------- TOOL DECISION --------
+Output one word:"""
 
-    async def _decide_tool(self, user_message: str) -> Optional[Dict[str, Any]]:
-        raw = await analyze_code(
-            prompt=self._decision_prompt(user_message),
-            code="",
-            language="json",
-            stream=False,
-            temperature=0.0,
-            stop=["\n\n"]
-        )
+        try:
+            classification = await analyze_code(prompt=prompt, code="", language="text", stream=False, temperature=0.0, stop=["\n"])
+            intent_str = classification.strip().upper()
+            intent_map = {
+                "FACTUAL_LOCAL": Intent.FACTUAL_LOCAL,
+                "FACTUAL_EXTERNAL": Intent.FACTUAL_EXTERNAL,
+                "EVALUATIVE": Intent.EVALUATIVE,
+                "HYPOTHETICAL": Intent.HYPOTHETICAL,
+                "CHAT": Intent.CHAT,
+                "INVALID": Intent.INVALID,
+            }
+            return intent_map.get(intent_str, Intent.CHAT)
+        except:
+            return Intent.CHAT
 
-        return parse_tool_call(raw)
+    async def _execute_tool(self, decision: ToolDecision) -> Dict[str, Any]:
+        """Execute tool based on router decision"""
+        try:
+            if decision.tool == ToolType.SEARCH_COMMITS:
+                # Use smart_search which already handles repo filtering
+                search_result = await asyncio.to_thread(
+                    smart_search,
+                    query=decision.query,
+                    limit=15
+                )
 
-    # -------- TOOL EXECUTION --------
+                # If router provided filters, apply them manually
+                results = search_result.get('results', [])
 
-    async def _run_tool(self, tool: str, args: Dict[str, Any]) -> Dict[str, Any]:
-        if tool == "search_commits":
-            results = await asyncio.to_thread(
-                keyword_search_commits,
-                query=args.get("query", ""),
-                limit=args.get("limit", 10)
-            )
-            # Enrich commit data
-            enriched_results = []
-            for commit in results:
-                enriched_results.append({
-                    "short_hash": commit['short_hash'],
-                    "message": commit['message'],
-                    "repo_name": commit['repo_name'],
-                    "author": commit.get('author', 'unknown'),
-                    "date": commit.get('timestamp', 'unknown'),
-                    "files_changed": [{"file_path": f['file_path'], "change_type": f['change_type']} for f in commit.get('files', [])[:3]]
-                })
-            return {"tool": tool, "results": enriched_results}
+                if decision.repo_filter:
+                    results = [r for r in results if decision.repo_filter.lower() in r.get('repo', '').lower()]
 
-        if tool == "web_search":
-            results = await asyncio.to_thread(
-                self.web.search,
-                query=args.get("query", ""),
-                num_results=args.get("limit", 3)
-            )
-            return {"tool": tool, "results": results}
+                if decision.language_filter:
+                    results = [r for r in results if any(
+                        f.get('language', '').lower() == decision.language_filter.lower()
+                        for f in r.get('files', [])
+                    )]
 
-        return {"error": f"Unknown tool: {tool}"}
+                # Format for display
+                formatted = []
+                for commit in results[:10]:
+                    formatted.append({
+                        "hash": commit.get('commit_hash', 'unknown'),
+                        "message": commit.get('message', 'No message'),
+                        "date": commit.get('date', 'unknown'),
+                        "repo": commit.get('repo', 'unknown'),
+                        "files": [f.get('path', '') for f in commit.get('files', [])[:3]],
+                        "snippets": commit.get('code_snippets', [])[:1],
+                        "score": commit.get('score', 0.0),
+                        "match_type": commit.get('match_type', 'unknown')
+                    })
 
-    # -------- FINAL ANSWER --------
+                return {
+                    "tool": "search_commits",
+                    "query": decision.query,
+                    "filters": {
+                        "repo": decision.repo_filter,
+                        "language": decision.language_filter
+                    },
+                    "count": len(formatted),
+                    "results": formatted,
+                    "reasoning": decision.reasoning
+                }
 
-    async def _stream_final_answer(self) -> AsyncGenerator[str, None]:
-        # Construct a string prompt from history
-        prompt_parts = [self._final_system_prompt()]
-        
-        for msg in self.history:
-            if msg["role"] == "user":
-                prompt_parts.append(f"\n[USER]: {msg['content']}")
-            elif msg["role"] == "assistant":
-                prompt_parts.append(f"\n[ASSISTANT]: {msg['content']}")
-            elif msg["role"] == "tool":
-                prompt_parts.append(f"\n[TOOL RESULT]: {msg['content']}")
-        
-        prompt_parts.append("\n[ASSISTANT]:")
-        final_prompt = "\n".join(prompt_parts)
+            elif decision.tool == ToolType.WEB_SEARCH:
+                results = await asyncio.to_thread(
+                    self.web.search,
+                    query=decision.query,
+                    num_results=5
+                )
 
-        response = await analyze_code(
-            prompt=final_prompt,
-            code="",
-            language="text",
-            stream=True,
-            temperature=0.7 # Higher temp for natural language
-        )
+                formatted = []
+                for result in results[:5]:
+                    formatted.append({
+                        "title": result.get('title', 'No title')[:100],
+                        "url": result.get('url', ''),
+                        "snippet": result.get('snippet', '')[:200],
+                        "source": result.get('source', 'unknown')
+                    })
 
-        async for chunk in response:
-            yield chunk
+                return {
+                    "tool": "web_search",
+                    "query": decision.query,
+                    "count": len(formatted),
+                    "results": formatted
+                }
+        except Exception as e:
+            return {"tool": decision.tool.value, "error": str(e), "count": 0, "results": []}
+        return {"error": "Unknown tool"}
 
-    # -------- PUBLIC ENTRY POINT --------
+    def _build_system_prompt(self, intent: Intent, context: ConversationContext) -> str:
+        base = f"You are DevLog, a CLI coding assistant.\nUser: {context.user_name} ({context.user_email})\nDate: {context.current_date}\n{context.repo_info}\n\n"
 
-    async def _classify_intent(self, user_message: str) -> str:
-        """
-        Classify user intent to guide tool usage and answer framing.
-        Categories:
-        - FACTUAL_LOCAL: Questions about specific code, commits, errors in this repo. (Needs tool)
-        - FACTUAL_EXTERNAL: Questions about general docs, libraries, news. (Needs web tool)
-        - EVALUATIVE: High-level quality/architecture/readiness questions. (No tool default)
-        - HYPOTHETICAL: "What if" scenarios or assumptions. (No tool default)
-        - INVALID: Premise contradicts reality (e.g. "assume Django" when not), or nonsensical. (Refuse)
-        - CHAT: General greeting/chitchat. (No tool)
-        """
-        prompt = (
-            f"Classify the intent of this user message into exactly one category.\n"
-            f"User message: \"{user_message}\"\n\n"
-            "Categories:\n"
-            "FACTUAL_LOCAL: Asking about specific commits, files, errors, or 'what did I do'.\n"
-            "FACTUAL_EXTERNAL: Asking about docs, libraries, news, 'latest version', 'how to'.\n"
-            "EVALUATIVE: Asking 'is it good?', 'production ready?', 'architecture review'.\n"
-            "HYPOTHETICAL: Asking 'what if', 'assume X', 'design a system'.\n"
-            "INVALID: Asking based on false premise (e.g. 'assume Django' when irrelevant), or malicious.\n"
-            "CHAT: 'Hello', 'thanks', 'who are you'.\n\n"
-            "Output ONLY the category name."
-        )
-        
-        raw_classification = await analyze_code(
-            prompt=prompt,
-            code="",
-            language="text",
-            stream=False,
-            temperature=0.0,
-            stop=["\n"]
-        )
-        
-        intent = raw_classification.strip().upper()
-        # Fallback to CHAT if model hallucinates a category
-        valid_intents = {"FACTUAL_LOCAL", "FACTUAL_EXTERNAL", "EVALUATIVE", "HYPOTHETICAL", "INVALID", "CHAT"}
-        if intent not in valid_intents:
-            return "CHAT"
-        return intent
+        if intent == Intent.EVALUATIVE:
+            return base + "User asks for evaluation. State you need specific criteria. Offer to check specific parts."
+        elif intent == Intent.INVALID:
+            return base + "User's premise is incorrect. Politely correct them based on actual commit history."
+        elif intent == Intent.HYPOTHETICAL:
+            return base + "Answer hypothetical with general software principles. State assumptions."
+        else:
+            return base + "Answer clearly and concisely using the tool results. Be specific with commit hashes, file names, and dates. Don't mention using tools."
+
+    def _format_history(self) -> str:
+        lines = []
+        for msg in self.history[-self.max_history:]:
+            if msg.role == "user":
+                lines.append(f"User: {msg.content}")
+            elif msg.role == "assistant":
+                lines.append(f"Assistant: {msg.content}")
+        return "\n".join(lines) if lines else ""
+
+    def _format_tool_result(self, tool_result: Dict[str, Any]) -> str:
+        if tool_result.get('error'):
+            return f"Tool error: {tool_result['error']}"
+
+        lines = [f"\n[Tool: {tool_result['tool']} | Found: {tool_result['count']} results]"]
+
+        if tool_result.get('filters'):
+            filters = tool_result['filters']
+            if filters.get('repo'):
+                lines.append(f"  Filtered by repo: '{filters['repo']}'")
+            if filters.get('language'):
+                lines.append(f"  Filtered by language: '{filters['language']}'")
+
+        if tool_result['tool'] == 'search_commits':
+            lines.append("\nCommits found:")
+            for r in tool_result['results'][:5]:
+                lines.append(f"  {r['hash']} | {r['message'][:80]} | {r['date']} | {r['repo']}")
+                if r['files']:
+                    lines.append(f"    Files: {', '.join(r['files'])}")
+                if r.get('snippets') and r['snippets'][0]:
+                    snippet = r['snippets'][0][:150].replace('\n', ' ')
+                    lines.append(f"    Code: {snippet}...")
+                lines.append(f"    Match: {r.get('match_type', 'unknown')} (score: {r.get('score', 0):.2f})")
+
+        elif tool_result['tool'] == 'web_search':
+            lines.append("\nWeb results:")
+            for r in tool_result['results'][:3]:
+                lines.append(f"  {r['title']}")
+                lines.append(f"  {r['snippet'][:100]}...")
+
+        return "\n".join(lines)
+
+    async def _generate_answer(self, user_message: str, intent: Intent, tool_result: Optional[Dict[str, Any]] = None) -> AsyncGenerator[str, None]:
+        context = self._get_context()
+        system_prompt = self._build_system_prompt(intent, context)
+        history_text = self._format_history()
+        tool_context = self._format_tool_result(tool_result) if tool_result else ""
+
+        full_prompt = f"""{system_prompt}
+
+{context.recent_commits[:800]}
+
+{history_text}
+
+{tool_context}
+
+User: {user_message}
+Assistant:"""
+
+        try:
+            response = await analyze_code(prompt=full_prompt, code="", language="text", stream=True, temperature=0.7)
+            async for chunk in response:
+                yield chunk
+        except Exception as e:
+            yield f"Error: {str(e)}"
 
     async def send_message(self, user_message: str) -> AsyncGenerator[str, None]:
-        # Record user input
-        self.history.append({"role": "user", "content": user_message})
+        self.history.append(Message(role="user", content=user_message))
 
-        # --- PHASE 0: Classify Intent ---
+        # Step 1: Classify intent
         intent = await self._classify_intent(user_message)
-        # yield f"[Intent detected: {intent}]\n" # Debugging visibility
 
-        tool_name = None
-        tool_args = {}
-        
-        # --- PHASE 1 & 2: Tool Routing (Only for Factual Intents) ---
-        if intent in ["FACTUAL_LOCAL", "FACTUAL_EXTERNAL"]:
-            decision = await self._decide_tool(user_message)
-            tool_name = decision.get("tool") if decision else None
-            tool_args = decision.get("args", {}) if decision else {}
+        # Step 2: Route to tool using smart router
+        decision = self.router.route(user_message, intent)
 
-            if tool_name:
-                yield f"[Running tool: {tool_name} with args: {tool_args} ...]\n"
-                try:
-                    tool_result = await self._run_tool(tool_name, tool_args)
-                    tool_result_content = json.dumps(tool_result)
-                    
-                    # Add tool result to history
-                    self.history.append({
-                        "role": "tool", 
-                        "content": tool_result_content,
-                        "name": tool_name # Helper for prompt building
-                    })
-                except Exception as e:
-                    yield f"[Error: {e}]"
-                    self.history.append({"role": "system", "content": f"Tool execution failed: {e}"})
-        
-        # --- PHASE 3: Final Answer ---
-        # Construct specific prompt based on intent
-        user_context_final_answer = self._get_user_context()
-        base_system_prompt = (
-            "You are DevLog, a local CLI coding assistant.\n"
-            f"User: {user_context_final_answer['name']} ({user_context_final_answer['email']}). Org: SDC.\n"
-        )
+        tool_result = None
+        if decision.tool != ToolType.NONE:
+            yield f"[{decision.reasoning}]\n"
 
-        if intent == "EVALUATIVE":
-            system_content_final_answer = base_system_prompt + (
-                "The user is asking for an evaluation. Do NOT guess.\n"
-                "State clearly that you cannot judge conclusively without specific criteria.\n"
-                "List specific criteria (e.g. tests, security, docs) needed for a proper evaluation.\n"
-                "Offer to check specific parts of the codebase if they provide them."
-            )
-        elif intent == "INVALID":
-            system_content_final_answer = base_system_prompt + (
-                "The user's premise seems incorrect or contradicts known context (e.g. asking about Django if not present).\n"
-                "Politely REFUSE to answer based on the false premise.\n"
-                "Correct the premise based on what you know about the repo (from recent commits context).\n"
-                "Do NOT try to be helpful by hallucinating an answer to a false premise."
-            )
-        elif intent == "HYPOTHETICAL":
-             system_content_final_answer = base_system_prompt + (
-                "The user is asking a hypothetical question.\n"
-                "Answer based on general software engineering principles.\n"
-                "Clearly state any assumptions you make."
-            )
-        else:
-            # Standard/Factual/Chat
-            system_content_final_answer = base_system_prompt + (
-                "Answer clearly and concisely using the provided context and tool results.\n"
-                "Do NOT reveal internal reasoning.\n"
-                "Do NOT explicitly mention tool usage."
-            )
-        
-        # Build prompt string for final answer
-        final_answer_prompt_parts = [system_content_final_answer]
-        for msg in self.history:
-            if msg["role"] == "user":
-                final_answer_prompt_parts.append(f"\n[USER]: {msg['content']}")
-            elif msg["role"] == "assistant":
-                final_answer_prompt_parts.append(f"\n[ASSISTANT]: {msg['content']}")
-            elif msg["role"] == "tool":
-                final_answer_prompt_parts.append(f"\n[TOOL RESULT ({msg.get('name', 'unknown')})]: {msg['content']}")
-        final_answer_prompt_parts.append("\n[ASSISTANT]:")
-        
-        final_answer_prompt = "\n".join(final_answer_prompt_parts)
+            tool_result = await self._execute_tool(decision)
 
-        response_generator = await analyze_code(
-            prompt=final_answer_prompt,
-            code="", # Corrected from None
-            language="text",
-            stream=True,
-            temperature=0.7,
-            stop=[]
-        )
-        
-        full_answer_content = ""
-        async for chunk in response_generator:
-            full_answer_content += chunk
+            if tool_result.get('count', 0) > 0:
+                yield f"[Found {tool_result['count']} results]\n"
+            else:
+                yield f"[No results found]\n"
+
+            self.history.append(Message(role="tool", content=str(tool_result), tool_name=decision.tool.value))
+
+        # Step 3: Generate final answer
+        full_answer = ""
+        async for chunk in self._generate_answer(user_message, intent, tool_result):
+            full_answer += chunk
             yield chunk
-        
-        self.history.append({"role": "assistant", "content": full_answer_content})
 
+        self.history.append(Message(role="assistant", content=full_answer))
 
-    def get_history(self) -> List[Dict]:
+    def get_history(self) -> List[Message]:
         return self.history
 
     def clear_history(self):
