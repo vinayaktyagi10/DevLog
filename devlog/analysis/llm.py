@@ -1,7 +1,7 @@
 """
 LLM Integration for Code Analysis using Ollama
 """
-import requests
+import httpx
 import json
 from typing import Optional, Dict, AsyncGenerator
 import re
@@ -134,16 +134,47 @@ Provide specific, actionable feedback.""" if code else prompt
         "options": options
     }
 
-    try:
-        response = requests.post(
-            LLMConfig.BASE_URL,
-            json=payload,
-            timeout=LLMConfig.TIMEOUT,
-            stream=stream # Enable streaming for requests library
-        )
+    async with httpx.AsyncClient(timeout=LLMConfig.TIMEOUT) as client:
+        try:
+            response = await client.post(
+                LLMConfig.BASE_URL,
+                json=payload,
+                stream=stream # Enable streaming for httpx
+            )
+            response.raise_for_status() # Raise an exception for 4xx or 5xx responses
 
-        if response.status_code != 200:
-            error_msg = f"Error: LLM returned status {response.status_code} - {response.text}"
+            if stream:
+                return _stream_response_generator(response)
+            else:
+                data = response.json()
+                return data.get("response", "No response from LLM")
+
+        except httpx.TimeoutException:
+            error_msg = "Error: LLM request timed out"
+            if stream:
+                async def error_generator():
+                    yield error_msg
+                return error_generator()
+            else:
+                return error_msg
+        except httpx.RequestError as e:
+            error_msg = f"Error: Could not connect to Ollama. Is it running? {e}"
+            if stream:
+                async def error_generator():
+                    yield error_msg
+                return error_generator()
+            else:
+                return error_msg
+        except httpx.HTTPStatusError as e:
+            error_msg = f"Error: LLM returned status {e.response.status_code} - {e.response.text}"
+            if stream:
+                async def error_generator():
+                    yield error_msg
+                return error_generator()
+            else:
+                return error_msg
+        except Exception as e:
+            error_msg = f"Error: {str(e)}"
             if stream:
                 async def error_generator():
                     yield error_msg
@@ -151,43 +182,11 @@ Provide specific, actionable feedback.""" if code else prompt
             else:
                 return error_msg
 
-        if stream:
-            return _stream_response_generator(response)
-        else:
-            data = response.json()
-            return data.get("response", "No response from LLM")
-
-    except requests.exceptions.Timeout:
-        error_msg = "Error: LLM request timed out"
-        if stream:
-            async def error_generator():
-                yield error_msg
-            return error_generator()
-        else:
-            return error_msg
-    except requests.exceptions.ConnectionError:
-        error_msg = "Error: Could not connect to Ollama. Is it running?"
-        if stream:
-            async def error_generator():
-                yield error_msg
-            return error_generator()
-        else:
-            return error_msg
-    except Exception as e:
-        error_msg = f"Error: {str(e)}"
-        if stream:
-            async def error_generator():
-                yield error_msg
-            return error_generator()
-        else:
-            return error_msg
-
-async def _stream_response_generator(response: requests.Response) -> AsyncGenerator[str, None]:
+async def _stream_response_generator(response: httpx.Response) -> AsyncGenerator[str, None]:
     """Helper to yield streaming content from Ollama response."""
-    for chunk in response.iter_content(chunk_size=None): # chunk_size=None means iterate over full response if not streaming
+    async for chunk in response.aiter_bytes():
         if chunk:
             try:
-                # Each chunk might contain multiple JSON objects or partial ones
                 decoded_chunk = chunk.decode('utf-8')
                 for line in decoded_chunk.splitlines():
                     if line.strip(): # Avoid empty lines
