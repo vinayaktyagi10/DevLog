@@ -2,6 +2,7 @@
 LLM Integration for Code Analysis using Ollama
 """
 import httpx
+import requests
 import json
 from typing import Optional, Dict, AsyncGenerator
 import re
@@ -134,74 +135,52 @@ Provide specific, actionable feedback.""" if code else prompt
         "options": options
     }
 
-    async with httpx.AsyncClient(timeout=LLMConfig.TIMEOUT) as client:
-        try:
-            response = await client.post(
-                LLMConfig.BASE_URL,
-                json=payload,
-                stream=stream # Enable streaming for httpx
-            )
-            response.raise_for_status() # Raise an exception for 4xx or 5xx responses
-
-            if stream:
-                return _stream_response_generator(response)
-            else:
+    if stream:
+        return _stream_response_generator(payload)
+    else:
+        async with httpx.AsyncClient(timeout=LLMConfig.TIMEOUT) as client:
+            try:
+                response = await client.post(
+                    LLMConfig.BASE_URL,
+                    json=payload
+                )
+                response.raise_for_status()
                 data = response.json()
                 return data.get("response", "No response from LLM")
-
-        except httpx.TimeoutException:
-            error_msg = "Error: LLM request timed out"
-            if stream:
-                async def error_generator():
-                    yield error_msg
-                return error_generator()
-            else:
-                return error_msg
-        except httpx.RequestError as e:
-            error_msg = f"Error: Could not connect to Ollama. Is it running? {e}"
-            if stream:
-                async def error_generator():
-                    yield error_msg
-                return error_generator()
-            else:
-                return error_msg
-        except httpx.HTTPStatusError as e:
-            error_msg = f"Error: LLM returned status {e.response.status_code} - {e.response.text}"
-            if stream:
-                async def error_generator():
-                    yield error_msg
-                return error_generator()
-            else:
-                return error_msg
-        except Exception as e:
-            error_msg = f"Error: {str(e)}"
-            if stream:
-                async def error_generator():
-                    yield error_msg
-                return error_generator()
-            else:
-                return error_msg
-
-async def _stream_response_generator(response: httpx.Response) -> AsyncGenerator[str, None]:
-    """Helper to yield streaming content from Ollama response."""
-    async for chunk in response.aiter_bytes():
-        if chunk:
-            try:
-                decoded_chunk = chunk.decode('utf-8')
-                for line in decoded_chunk.splitlines():
-                    if line.strip(): # Avoid empty lines
-                        data = json.loads(line)
-                        if "response" in data:
-                            yield data["response"]
-                        if data.get("done"):
-                            return # End of stream
-            except json.JSONDecodeError:
-                # Handle incomplete JSON objects if they arrive in separate chunks
-                # For simplicity, we'll try to parse each line as a full object
-                # In a real app, you might buffer and parse
-                yield f"[ERROR: Partial JSON chunk: {chunk.decode('utf-8')}]"
+            except httpx.TimeoutException:
+                return "Error: LLM request timed out"
+            except httpx.RequestError as e:
+                return f"Error: Could not connect to Ollama. {e}"
             except Exception as e:
-                yield f"[ERROR processing stream: {e}]"
+                return f"Error: {str(e)}"
+
+async def _stream_response_generator(payload: dict) -> AsyncGenerator[str, None]:
+    """Helper to yield streaming content from Ollama response."""
+    async with httpx.AsyncClient(timeout=LLMConfig.TIMEOUT) as client:
+        try:
+            async with client.stream("POST", LLMConfig.BASE_URL, json=payload) as response:
+                response.raise_for_status()
+                async for chunk in response.aiter_text():
+                    if chunk:
+                        try:
+                            # Ollama sends multiple JSON objects, one per line
+                            for line in chunk.splitlines():
+                                if line.strip():
+                                    data = json.loads(line)
+                                    if "response" in data:
+                                        yield data["response"]
+                                    if data.get("done"):
+                                        return
+                        except json.JSONDecodeError:
+                            continue
+                        except Exception as e:
+                            yield f"[ERROR: {e}]"
+        except httpx.TimeoutException:
+            yield "Error: LLM request timed out"
+        except httpx.RequestError as e:
+            yield f"Error: Could not connect to Ollama. {e}"
+        except Exception as e:
+            yield f"Error: {str(e)}"
 
 
 def test_connection() -> bool:

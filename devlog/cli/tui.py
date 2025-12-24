@@ -365,10 +365,10 @@ class SearchPanel(Container):
         print(f"DEBUG SEARCH: perform_search called. Query='{query}', Repo='{repo}'")
         results = await asyncio.to_thread(search_commits, query=query, repo_name=repo, limit=50)
         print(f"DEBUG SEARCH: perform_search received {len(results)} results.")
-        
+
         list_view = self.query_one("#search-results-list", CommitList)
-        list_view.commits = results # This will trigger watch_commits
-        
+        list_view.commits = results
+
         if not results:
             self.app.notify("No commits found matching your criteria", severity="information")
         else:
@@ -626,12 +626,16 @@ class ReviewWorkflow(VerticalScroll):
         results.update(Text.from_markup("\n".join(lines)))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "new-review-btn":
-            self.app.action_start_review()
-        elif event.button.id == "export-md-btn":
-            self.export_review("markdown")
-        elif event.button.id == "export-json-btn":
-            self.export_review("json")
+        try:
+            if event.button.id == "new-review-btn":
+                self.app.action_start_review()
+            elif event.button.id == "export-md-btn":
+                self.export_review("markdown")
+            elif event.button.id == "export-json-btn":
+                self.export_review("json")
+        except Exception as e:
+            logger.error(f"Error in on_button_pressed: {e}")
+            self.app.notify(f"Error: {e}", severity="error")
 
     def export_review(self, format: str) -> None:
         if not self.review_data:
@@ -805,25 +809,29 @@ class DevLogTUI(App):
 
     async def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
         """Handle commit selection"""
-        if event.list_view.id == "commit-list":
-            commit_list = self.query_one("#commit-list", CommitList)
-            commit = commit_list.get_selected_commit()
+        try:
+            if event.list_view.id == "commit-list":
+                commit_list = self.query_one("#commit-list", CommitList)
+                commit = commit_list.get_selected_commit()
 
-            if commit:
-                code_viewer = self.query_one("#code-viewer", CodeViewer)
-                code_viewer.show_commit_code(commit['short_hash'])
+                if commit:
+                    code_viewer = self.query_one("#code-viewer", CodeViewer)
+                    code_viewer.show_commit_code(commit['short_hash'])
 
-                # Clear previous analysis
-                analysis = self.query_one("#analysis-panel", AnalysisDisplay)
-                analysis.analysis = None
-        
-        elif event.list_view.id == "search-results-list":
-            commit_list = self.query_one("#search-results-list", CommitList)
-            commit = commit_list.get_selected_commit()
+                    # Clear previous analysis
+                    analysis = self.query_one("#analysis-panel", AnalysisDisplay)
+                    analysis.analysis = None
             
-            if commit:
-                code_viewer = self.query_one("#search-code-viewer", CodeViewer)
-                code_viewer.show_commit_code(commit['short_hash'])
+            elif event.list_view.id == "search-results-list":
+                commit_list = self.query_one("#search-results-list", CommitList)
+                commit = commit_list.get_selected_commit()
+                
+                if commit:
+                    code_viewer = self.query_one("#search-code-viewer", CodeViewer)
+                    code_viewer.show_commit_code(commit['short_hash'])
+        except Exception as e:
+            logger.error(f"Error in on_list_view_highlighted: {e}")
+            self.app.notify(f"Error: {e}", severity="error")
 
     # ==================== ACTIONS ====================
 

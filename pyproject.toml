@@ -28,4 +28,3 @@ dependencies = [
 devlog = "devlog.__main__:main"
 devlog-tui = "devlog.cli.tui:main"
 devlog-chat = "devlog.cli.chat_tui:main"
-
